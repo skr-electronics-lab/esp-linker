@@ -5,6 +5,13 @@ All notable changes to ESP-Linker will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.9] - 2026-10-07
+
+### Fixed
+- **Subprocess Isolation**: Isolated `esptool` child processes from local directory module shadowing by launching subprocesses in a safe working directory and passing `-P` (`safe_path`). This prevents empty or local `esptool.py` files in user directories from hijacking the execution.
+- **Flashing Verification Guard**: Added an explicit verification guard in `_execute_flash()`. Flashing will now strictly raise a `FlashError` if no data blocks were written to the target chip, preventing false success reports on empty subprocess runs.
+- **Dynamic Firmware Version Resolution**: Wired pre-flash configuration panels and telemetry outputs directly to `__firmware_version__`.
+
 ## [1.3.8] - 2026-10-07
 
 ### Added

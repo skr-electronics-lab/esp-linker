@@ -16,13 +16,15 @@ import sys
 import time
 import subprocess
 import re
+import tempfile
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Callable
 
 import serial.tools.list_ports
 
 from .logger import get_logger
-from .exceptions import FlashError, DeviceNotFoundError
+from .exceptions import FlashError, DeviceNotFoundError, TimeoutError
+from .version import __firmware_version__
 
 logger = get_logger(__name__)
 
@@ -317,8 +319,12 @@ class ESP8266Flasher:
                        callbacks: Optional[Any] = None,
                        progress_callback: Optional[Callable] = None) -> bool:
         """Execute esptool flash with unbuffered real-time output streaming"""
-        cmd = [
-            sys.executable, "-u", "-m", "esptool",
+        py_cmd = [sys.executable]
+        if sys.version_info >= (3, 11):
+            py_cmd.append("-P")
+        py_cmd.extend(["-u", "-m", "esptool"])
+
+        cmd = py_cmd + [
             "--chip", "esp8266",
             "--port", port,
             "--baud", str(baud_rate),
@@ -338,13 +344,15 @@ class ESP8266Flasher:
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        safe_cwd = tempfile.gettempdir()
 
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             bufsize=0,
-            env=env
+            env=env,
+            cwd=safe_cwd
         )
 
         all_output = []
@@ -435,6 +443,11 @@ class ESP8266Flasher:
             if "Timed out waiting for packet header" in full_log or "Failed to connect" in full_log:
                 raise TimeoutError(f"Connection timed out at {baud_rate} baud.\n{full_log}")
             raise FlashError(f"Flashing failed with exit code {process.returncode}:\n{full_log}")
+
+        if not flashing_started and "Hash of data verified" not in full_log and "Wrote " not in full_log:
+            if callbacks and hasattr(callbacks, "finish"):
+                callbacks.finish()
+            raise FlashError(f"Flashing failed: esptool did not write any data to the target.\n{full_log}")
 
         if callbacks and hasattr(callbacks, "on_reset_complete"):
             callbacks.on_reset_complete()
@@ -529,18 +542,23 @@ class ESP8266Flasher:
         if port is None:
             port = self.auto_detect_port()
 
-        cmd = [
-            sys.executable, "-m", "esptool",
+        py_cmd = [sys.executable]
+        if sys.version_info >= (3, 11):
+            py_cmd.append("-P")
+        py_cmd.extend(["-m", "esptool"])
+
+        cmd = py_cmd + [
             "--chip", "esp8266",
             "--port", port,
             "--baud", str(self.FALLBACK_BAUD_RATE),
             "chip-id"
         ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        safe_cwd = tempfile.gettempdir()
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=safe_cwd)
         if result.returncode != 0:
             cmd[-1] = "chip_id"
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=safe_cwd)
 
         if result.returncode != 0:
             raise FlashError(f"Failed to query chip info: {result.stderr or result.stdout}")
@@ -574,7 +592,7 @@ class ESP8266Flasher:
             'size': stat.st_size,
             'size_kb': round(stat.st_size / 1024, 1),
             'modified': time.ctime(stat.st_mtime),
-            'version': '1.3.8',
+            'version': __firmware_version__,
             'name': 'ESP-Linker Firmware',
             'description': 'Universal ESP-Linker firmware with WiFi configuration, Serial CLI, and PyFirmata-style GPIO control'
         }

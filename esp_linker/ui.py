@@ -12,6 +12,8 @@ import os
 import time
 from typing import Optional, Dict, Any, List, Callable
 
+from .version import __version__, __firmware_version__
+
 # Rich Terminal Toolkit
 try:
     from rich.console import Console
@@ -213,7 +215,7 @@ class UIManager:
             table.add_row("Target Board", "ESP8266 (NodeMCU / Generic)")
             table.add_row("Serial Port", f"[bold white]{port}[/bold white]")
             table.add_row("Baud Rate", f"{baud:,} bps (auto-fallback 115,200)")
-            table.add_row("Firmware Image", f"{info.get('name', 'ESP-Linker Firmware')} v{info.get('version', '1.3.8')}")
+            table.add_row("Firmware Image", f"{info.get('name', 'ESP-Linker Firmware')} v{info.get('version', __firmware_version__)}")
             table.add_row("Binary Size", f"{info.get('size_kb', 0)} KB ({info.get('size', 0):,} bytes)")
             table.add_row("Flash Target", "0x00000 (dio, 40MHz, 4MB auto-detect)")
 
@@ -221,7 +223,7 @@ class UIManager:
         else:
             print("-" * 50)
             print(f"Target: ESP8266 | Port: {port} | Baud: {baud}")
-            print(f"Firmware: {info.get('name', 'ESP-Linker')} v{info.get('version', '1.3.8')} ({info.get('size_kb', 0)} KB)")
+            print(f"Firmware: {info.get('name', 'ESP-Linker')} v{info.get('version', __firmware_version__)} ({info.get('size_kb', 0)} KB)")
             print("-" * 50)
 
     def show_flash_success(self, port: str):
