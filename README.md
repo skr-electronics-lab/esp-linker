@@ -3,9 +3,15 @@
 [![PyPI version](https://img.shields.io/pypi/v/esp-linker?style=flat-square&color=0088cc)](https://pypi.org/project/esp-linker/)
 [![Python versions](https://img.shields.io/pypi/pyversions/esp-linker?style=flat-square&color=22bb33)](https://pypi.org/project/esp-linker/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
-[![Support on Ko-fi](https://raw.githubusercontent.com/skr-electronics-lab/flyradar32/main/assets/kofi_button.svg)](https://ko-fi.com/skrelectronicslab)
+[![GitHub release](https://img.shields.io/github/v/release/skr-electronics-lab/esp-linker?style=flat-square&color=orange)](https://github.com/skr-electronics-lab/esp-linker/releases)
 
 ESP-Linker converts ESP8266 microcontrollers into high-performance, network-attached wireless GPIO servers. Program your hardware directly from Python over WiFi using an intuitive, PyFirmata-inspired interface without writing, compiling, or uploading Arduino C++ code for every project change.
+
+<p align="left">
+  <a href="https://ko-fi.com/skrelectronicslab" target="_blank">
+    <img src="https://raw.githubusercontent.com/skr-electronics-lab/flyradar32/main/assets/kofi_button.svg" height="36" alt="Support on Ko-fi">
+  </a>
+</p>
 
 ---
 
@@ -531,7 +537,11 @@ esp-linker test 192.168.1.9 --servo-pin 12   # Specify custom servo pin for swee
 
 If ESP-Linker helps your projects, DIY prototypes, or academic lab work, please consider supporting development:
 
-[![Support on Ko-fi](https://raw.githubusercontent.com/skr-electronics-lab/flyradar32/main/assets/kofi_button.svg)](https://ko-fi.com/skrelectronicslab)
+<p align="left">
+  <a href="https://ko-fi.com/skrelectronicslab" target="_blank">
+    <img src="https://raw.githubusercontent.com/skr-electronics-lab/flyradar32/main/assets/kofi_button.svg" height="38" alt="Support on Ko-fi">
+  </a>
+</p>
 
 - **YouTube**: [@skr_electronics_lab](https://youtube.com/@skr_electronics_lab)
 - **Instagram**: [@skr_electronics_lab](https://instagram.com/skr_electronics_lab)
