@@ -653,7 +653,7 @@ DASHBOARD_HTML = """
             const config = {
                 devices: devices,
                 timestamp: new Date().toISOString(),
-                version: '1.3.6'
+                version: '1.3.9'
             };
             const blob = new Blob([JSON.stringify(config, null, 2)], {type: 'application/json'});
             const url = URL.createObjectURL(blob);

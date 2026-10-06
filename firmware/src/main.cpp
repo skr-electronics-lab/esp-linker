@@ -858,7 +858,7 @@ void handleSerialCommands() {
                     Serial.println("RESET_CONFIG - Clear saved WiFi credentials");
                 } else if (serialBuffer.equalsIgnoreCase("STATUS")) {
                     Serial.println("\n--- ESP-Linker Status ---");
-                    Serial.println("Firmware: ESP-Linker v1.3.8");
+                    Serial.println("Firmware: ESP-Linker v1.3.9");
                     Serial.println("Uptime: " + String(millis() / 1000) + "s");
                     Serial.println("Free Heap: " + String(ESP.getFreeHeap()) + " bytes");
                     if (WiFi.status() == WL_CONNECTED) {
