@@ -1,0 +1,34 @@
+# ESP-Linker Package Manifest
+# Professional PyPI package manifest for ESP-Linker
+# (c) 2025 SK Raihan / SKR Electronics Lab
+
+# Core documentation
+include README.md
+include CHANGELOG.md
+
+
+
+
+# Package configuration
+include requirements.txt
+include pyproject.toml
+
+# Python source code
+recursive-include esp_linker *.py
+
+# Firmware files
+recursive-include esp_linker/firmware *.bin
+
+# Exclude development and build files
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude .DS_Store
+global-exclude *.so
+global-exclude .git*
+global-exclude *.log
+global-exclude *.tmp
+prune tests
+prune docs
+prune build
+prune dist
+prune *.egg-info

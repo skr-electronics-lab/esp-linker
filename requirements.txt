@@ -1,0 +1,16 @@
+# ESP-Linker Python Library Requirements
+# © 2025 SK Raihan / SKR Electronics Lab
+
+# Core dependencies
+requests>=2.25.0
+urllib3>=1.26.0
+
+# Firmware flashing dependencies
+esptool>=4.5.0
+pyserial>=3.5
+
+# UI enhancements
+tqdm>=4.65.0
+
+# Device discovery
+zeroconf>=0.38.0

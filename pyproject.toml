@@ -1,0 +1,120 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esp-linker"
+dynamic = ["version"]
+description = "Professional wireless GPIO control for ESP8266 boards with PyFirmata-inspired interface"
+readme = "README.md"
+
+authors = [
+    {name = "SK Raihan", email = "skrelectronicslab@gmail.com"}
+]
+maintainers = [
+    {name = "SK Raihan", email = "skrelectronicslab@gmail.com"}
+]
+keywords = [
+    "esp8266", "esp32", "gpio", "iot", "wireless", "arduino", 
+    "microcontroller", "automation", "robotics", "electronics", 
+    "maker", "diy", "wifi", "remote control"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Hardware",
+    "Topic :: Home Automation",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Education",
+]
+requires-python = ">=3.7"
+dependencies = [
+    "requests>=2.25.0",
+    "pyserial>=3.5",
+    "zeroconf>=0.38.0",
+    "tqdm>=4.62.0",
+    "colorama>=0.4.4",
+    "flask>=2.0.0",
+    "flask-cors>=3.0.10",
+    "esptool>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.0",
+    "black>=21.0",
+    "flake8>=3.8",
+    "mypy>=0.800",
+    "build>=0.7.0",
+    "twine>=3.4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/skr-electronics-lab/esp-linker"
+Documentation = "https://github.com/skr-electronics-lab/esp-linker#readme"
+Repository = "https://github.com/skr-electronics-lab/esp-linker.git"
+"Bug Tracker" = "https://github.com/skr-electronics-lab/esp-linker/issues"
+Changelog = "https://github.com/skr-electronics-lab/esp-linker/blob/main/CHANGELOG.md"
+"Author Website" = "https://www.skrelectronicslab.com"
+"YouTube Channel" = "https://www.youtube.com/@skr_electronics_lab"
+"Instagram" = "https://www.instagram.com/skr_electronics_lab"
+"Support" = "https://buymeacoffee.com/skrelectronics"
+
+[project.scripts]
+esp-linker = "esp_linker.cli:main"
+
+[tool.setuptools]
+packages = ["esp_linker"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+esp_linker = ["firmware/*.bin"]
+
+[tool.setuptools.dynamic]
+version = {attr = "esp_linker.version.__version__"}
+
+[tool.black]
+line-length = 88
+target-version = ['py37']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.mypy]
+python_version = "3.7"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
