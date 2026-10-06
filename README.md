@@ -37,16 +37,8 @@ ESP-Linker converts ESP8266 microcontrollers into high-performance, network-atta
 
 ## Installation
 
-Install the latest stable release from PyPI:
-
 ```bash
-pip install --upgrade esp-linker
-```
-
-To include the optional web dashboard:
-
-```bash
-pip install --upgrade "esp-linker[dashboard]"
+pip install esp-linker
 ```
 
 ---
