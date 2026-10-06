@@ -23,7 +23,17 @@ from .exceptions import (
     APIError,
     FlashError
 )
-from .flasher import ESP8266Flasher, flash_esp8266, detect_esp8266, get_chip_info
+from .flasher import (
+    ESP8266Flasher,
+    flash_esp8266,
+    detect_esp8266,
+    get_chip_info,
+    print_badge,
+    ui_print,
+    render_banner,
+    RICH_AVAILABLE,
+    console
+)
 from .wifi_wizard import run_wifi_wizard
 from .device_manager import get_device_manager
 
@@ -68,9 +78,7 @@ def discover_devices_cli():
     args = parser.parse_args()
 
     if not args.json:
-        print("[*] ESP-Linker Device Discovery")
-        print("(c) 2025 SK Raihan / SKR Electronics Lab")
-        print("=" * 50)
+        render_banner("ESP-LINKER DEVICE DISCOVERY", "Network Scanner")
 
     try:
         if args.network:
@@ -83,31 +91,44 @@ def discover_devices_cli():
             print(json.dumps(devices, indent=2))
         else:
             if devices:
-                print(f"\n[*] Found {len(devices)} ESP-Link device(s):")
-                print("-" * 50)
-                for i, device in enumerate(devices, 1):
-                    print(f"{i}. {device['firmware_name']} v{device['firmware_version']}")
-                    print(f"   IP: {device['ip']}")
-                    print(f"   URL: {device['url']}")
-                    print(f"   WiFi: {device['wifi_ssid'] or 'Not connected'}")
-                    print(f"   Uptime: {format_uptime(device['uptime'])}")
-                    print(f"   Memory: {format_memory(device['free_heap'])} free")
-                    print(f"   Chip ID: {device['chip_id']}")
-                    if args.verbose:
-                        print(f"   Raw Data: {device}")
-                    print()
+                if RICH_AVAILABLE and console:
+                    from rich.table import Table
+                    from rich import box
+                    table = Table(
+                        title=f"Discovered ESP-Linker Devices ({len(devices)})",
+                        box=box.ROUNDED,
+                        header_style="bold cyan",
+                        border_style="cyan"
+                    )
+                    table.add_column("#", style="dim", width=4)
+                    table.add_column("Device / Firmware", style="bold white", width=22)
+                    table.add_column("IP Address", style="bold cyan", width=16)
+                    table.add_column("WiFi SSID", style="white")
+                    table.add_column("Uptime", style="dim")
+                    table.add_column("Free Memory", justify="right", style="green")
 
-                print("[i] Usage:")
-                print("   from esp_linker import ESPBoard")
-                print(f"   board = ESPBoard(ip='{devices[0]['ip']}')")
+                    for i, d in enumerate(devices, 1):
+                        table.add_row(
+                            str(i),
+                            f"{d.get('firmware_name', 'ESP-Linker')} v{d.get('firmware_version', '1.0')}",
+                            d['ip'],
+                            d.get('wifi_ssid') or "[dim]AP Mode[/dim]",
+                            format_uptime(d.get('uptime', 0)),
+                            format_memory(d.get('free_heap', 0))
+                        )
+                    console.print(table)
+                    ui_print("\n[bold cyan]Usage in Python:[/bold cyan]")
+                    ui_print(f"  from esp_linker import ESPBoard\n  board = ESPBoard(ip='{devices[0]['ip']}')\n")
+                else:
+                    print(f"\nFound {len(devices)} device(s):")
+                    for i, d in enumerate(devices, 1):
+                        print(f"{i}. {d['firmware_name']} at {d['ip']} ({d.get('wifi_ssid', 'AP Mode')})")
             else:
-                print("\n[!] No ESP-Linker devices found")
-                print("\nTroubleshooting:")
-                print("- Check ESP8266 is powered on")
-                print("- Verify device is on the same network")
-                print("- Try connecting to ESP_Link AP (192.168.4.1)")
-                print("- Use --network flag to specify network range")
-                print("- Use --verbose flag for more details")
+                print_badge("WARN", "No ESP-Linker devices found on the local network.")
+                ui_print("\n[dim]Troubleshooting:[/dim]")
+                ui_print("  - Ensure board is powered on and within WiFi range")
+                ui_print("  - Ensure your PC and ESP are on the same subnet")
+                ui_print("  - Run [bold white]esp-linker setup-wifi[/bold white] to reconfigure credentials\n")
 
     except KeyboardInterrupt:
         print("\n\n[!] Discovery cancelled by user")
@@ -382,103 +403,78 @@ def flash_esp8266_cli():
 
         # List ports
         if args.list_ports:
-            print("[?] Available Serial Ports:")
-            print("=" * 50)
-            ports = detect_esp8266()
-
-            if not ports:
-                print("[!] No serial ports found")
-                return
-
-            for i, port in enumerate(ports, 1):
-                esp_indicator = "[*] (Likely ESP8266)" if port['likely_esp'] else ""
-                print(f"{i}. {port['port']} - {port['description']} {esp_indicator}")
-                print(f"   HWID: {port['hwid']}")
-                print(f"   Manufacturer: {port['manufacturer']}")
-                print()
+            flasher.display_ports_table()
             return
 
         # Show chip info
         if args.chip_info:
-            print("[?] ESP8266 Chip Information:")
-            print("=" * 50)
-
             try:
-                info = get_chip_info(args.port)
-                print(f"Port: {info['port']}")
-                print(f"Chip Type: {info['chip_type']}")
-                if 'chip_id' in info:
-                    print(f"Chip ID: {info['chip_id']}")
-                if 'mac_address' in info:
-                    print(f"MAC Address: {info['mac_address']}")
-                if 'flash_size' in info:
-                    print(f"Flash Size: {info['flash_size']}")
-                print()
-                print("Raw Output:")
-                print(info['raw_output'])
-
+                info = flasher.get_chip_info(args.port)
+                if RICH_AVAILABLE and console:
+                    from rich.table import Table
+                    from rich.panel import Panel
+                    from rich import box
+                    table = Table(box=box.ROUNDED, border_style="cyan", show_header=False)
+                    table.add_column("Property", style="bold cyan", width=16)
+                    table.add_column("Value", style="white")
+                    table.add_row("Port", info['port'])
+                    table.add_row("Chip Type", info['chip_type'])
+                    if 'chip_id' in info:
+                        table.add_row("Chip ID", str(info['chip_id']))
+                    if 'mac_address' in info:
+                        table.add_row("MAC Address", str(info['mac_address']))
+                    console.print(Panel(table, title="[bold white]Chip Telemetry[/bold white]", box=box.ROUNDED, border_style="cyan"))
+                else:
+                    print(f"Port: {info['port']} | Chip: {info['chip_type']} | ID: {info.get('chip_id', 'N/A')}")
             except Exception as e:
-                print(f"[!] Failed to get chip info: {e}")
+                print_badge("ERROR", f"Failed to get chip info: {e}")
             return
 
         # Show firmware info
         if args.firmware_info:
-            print("[+] Bundled Firmware Information:")
-            print("=" * 50)
-
             try:
                 info = flasher.get_firmware_info()
-                print(f"Name: {info['name']}")
-                print(f"Version: {info['version']}")
-                print(f"Description: {info['description']}")
-                print(f"Size: {info['size_kb']} KB ({info['size']:,} bytes)")
-                print(f"Path: {info['path']}")
-                print(f"Modified: {info['modified']}")
-
+                if RICH_AVAILABLE and console:
+                    from rich.table import Table
+                    from rich.panel import Panel
+                    from rich import box
+                    table = Table(box=box.ROUNDED, border_style="cyan", show_header=False)
+                    table.add_column("Property", style="bold cyan", width=16)
+                    table.add_column("Value", style="white")
+                    table.add_row("Name", info['name'])
+                    table.add_row("Version", info['version'])
+                    table.add_row("Description", info['description'])
+                    table.add_row("File Size", f"{info['size_kb']} KB ({info['size']:,} bytes)")
+                    table.add_row("Binary Path", info['path'])
+                    table.add_row("Last Modified", info['modified'])
+                    console.print(Panel(table, title="[bold white]Bundled Firmware Image[/bold white]", box=box.ROUNDED, border_style="cyan"))
+                else:
+                    print(f"Firmware: {info['name']} v{info['version']} ({info['size_kb']} KB)")
             except Exception as e:
-                print(f"[!] Failed to get firmware info: {e}")
+                print_badge("ERROR", f"Failed to get firmware info: {e}")
             return
 
         # Flash firmware
-        print("[*] ESP-Linker Firmware Flasher")
-        print("=" * 50)
-
-        def progress_callback(message):
-            print(message)
-
-        success = flash_esp8266(
+        success = flasher.flash_firmware(
             port=args.port,
             baud_rate=args.baud,
-            erase_flash=not args.no_erase,
-            progress_callback=progress_callback
+            erase_flash=not args.no_erase
         )
-
-        if success:
-            print("\n[*] Firmware flashing completed successfully!")
-            print("[=] Next steps:")
-            print("   1. Disconnect and reconnect ESP8266")
-            print("   2. Use serial commands to configure WiFi:")
-            print("      WIFI_CONFIG:YourWiFi,YourPassword")
-            print("   3. Start using ESP-Linker Python library!")
-            print("\n[i] Quick test:")
-            print("   from esp_linker import connect_auto")
-            print("   board = connect_auto()")
-        else:
-            print("[!] Firmware flashing failed!")
+        if not success:
             sys.exit(1)
 
     except FlashError as e:
-        print(f"[!] Flash Error: {e}")
+        print_badge("ERROR", f"Flash Error: {e}")
         sys.exit(1)
     except DeviceNotFoundError as e:
-        print(f"[!] Device Error: {e}")
-        print("\n[i] Try:")
-        print("   - Check ESP8266 is connected via USB")
-        print("   - Use --list-ports to see available ports")
-        print("   - Specify port manually with --port COM3 (Windows) or --port /dev/ttyUSB0 (Linux)")
+        print_badge("ERROR", f"Device Error: {e}")
+        ui_print("\n[dim]Troubleshooting:[/dim]")
+        ui_print("  - Check that ESP8266 is connected via USB data cable")
+        ui_print("  - Run [bold white]esp-linker detect[/bold white] to see available serial ports")
+        ui_print("  - Specify port manually with: [bold white]esp-linker flash --port COM3[/bold white]")
         sys.exit(1)
     except Exception as e:
-        print(f"[!] Unexpected error: {e}")
+        print_badge("ERROR", f"Execution error: {e}")
         sys.exit(1)
 
 
@@ -497,42 +493,17 @@ def detect_esp8266_cli():
     args = parser.parse_args()
 
     try:
-        ports = detect_esp8266()
-
         if args.json:
+            import json
+            ports = detect_esp8266()
             print(json.dumps(ports, indent=2))
             return
 
-        print("[?] ESP8266 Detection Results:")
-        print("=" * 50)
-
-        if not ports:
-            print("[!] No serial ports found")
-            print("\n[i] Make sure:")
-            print("   - ESP8266 is connected via USB")
-            print("   - USB drivers are installed")
-            print("   - Device is powered on")
-            return
-
-        esp_found = False
-        for i, port in enumerate(ports, 1):
-            if port['likely_esp']:
-                esp_found = True
-                print(f"[*] ESP8266 Found: {port['port']}")
-                print(f"   Description: {port['description']}")
-                print(f"   Manufacturer: {port['manufacturer']}")
-                print(f"   HWID: {port['hwid']}")
-                print()
-
-        if not esp_found:
-            print("[!] No ESP8266 boards detected, but found these ports:")
-            for i, port in enumerate(ports, 1):
-                print(f"{i}. {port['port']} - {port['description']}")
-            print("\n[i] If your ESP8266 is in the list above, you can specify it manually:")
-            print("   esp-linker flash --port COM3  (replace COM3 with your port)")
-
+        render_banner("ESP-LINKER HARDWARE DETECT", "Serial Port Scanner")
+        flasher = ESP8266Flasher()
+        flasher.display_ports_table()
     except Exception as e:
-        print(f"[!] Detection failed: {e}")
+        print_badge("ERROR", f"Detection failed: {e}")
         sys.exit(1)
 
 
@@ -791,45 +762,47 @@ def dashboard_entry():
 
 
 def show_help():
-    """Show help information"""
+    """Show help information with Rich TUI"""
     from . import __version__
-    print(f"[*] ESP-Linker v{__version__} - Command Line Interface")
-    print("=" * 50)
-    print("[=] Available commands:")
-    print("   discover    - Discover ESP-Linker devices on network")
-    print("   test        - Test ESP-Linker device functionality")
-    print("   flash       - Flash ESP-Linker firmware to ESP8266")
-    print("   detect      - Detect ESP8266 boards via USB")
-    print("   setup-wifi  - Interactive WiFi configuration wizard")
-    print("   devices     - Manage multiple ESP-Linker devices")
-    print("   dashboard   - Launch web dashboard")
-    print("   wifi        - WiFi management commands")
-    print("   reset       - Factory reset ESP-Linker device")
-    print("\n[=] WiFi Management Commands:")
-    print("   wifi status      - Check WiFi status of ESP8266")
-    print("   wifi enable-ap   - Enable Access Point mode")
-    print("   wifi disable-ap  - Disable Access Point mode")
-    print("\n[=] Flash Commands:")
-    print("   flash --firmware-info  - Show bundled firmware information")
-    print("   flash --list-ports     - List available serial ports")
-    print("   flash --chip-info      - Show ESP8266 chip information")
-    print("\n[=] Global options:")
-    print("   --version, -v  - Show version information")
-    print("   --help, -h     - Show this help message")
-    print("\n[i] Examples:")
-    print("   esp-linker --version")
-    print("   esp-linker flash")
-    print("   esp-linker flash --port COM3 --baud 115200")
-    print("   esp-linker setup-wifi")
-    print("   esp-linker devices list")
-    print("   esp-linker dashboard")
-    print("   esp-linker wifi status --ip 192.168.1.100")
-    print("   esp-linker reset --ip 192.168.1.100")
-    print("\n[*] Quick start:")
-    print("   1. esp-linker flash          # Flash firmware")
-    print("   2. esp-linker setup-wifi     # Configure WiFi")
-    print("   3. esp-linker discover       # Find devices")
-    print("   4. esp-linker dashboard      # Launch web interface")
+    render_banner("ESP-LINKER COMMAND LINE INTERFACE", f"Version {__version__}")
+
+    if RICH_AVAILABLE and console:
+        from rich.table import Table
+        from rich import box
+        table = Table(
+            title="Available Commands",
+            box=box.ROUNDED,
+            header_style="bold cyan",
+            border_style="cyan"
+        )
+        table.add_column("Command", style="bold white", width=18)
+        table.add_column("Description", style="white")
+
+        table.add_row("flash", "Auto-detect and flash ESP-Linker firmware to ESP8266")
+        table.add_row("detect", "Scan connected USB ports and identify ESP boards")
+        table.add_row("setup-wifi", "Interactive USB serial WiFi configuration wizard")
+        table.add_row("discover", "Scan local network for active ESP-Linker devices")
+        table.add_row("test <IP>", "Run hardware diagnostic tests on connected board")
+        table.add_row("dashboard", "Launch local browser-based control dashboard")
+        table.add_row("devices", "Manage stored device registry")
+        table.add_row("reset --ip <IP>", "Factory reset board settings")
+
+        console.print(table)
+
+        ui_print("\n[bold cyan]Quick Workflow:[/bold cyan]")
+        ui_print("  1. [bold white]esp-linker flash[/bold white]       - Install firmware via USB")
+        ui_print("  2. [bold white]esp-linker setup-wifi[/bold white]  - Configure WiFi credentials")
+        ui_print("  3. [bold white]esp-linker discover[/bold white]    - Locate boards on network")
+        ui_print("  4. [bold white]esp-linker dashboard[/bold white]   - Launch browser interface\n")
+    else:
+        print("\nAvailable commands:")
+        print("   flash       - Flash ESP-Linker firmware to ESP8266")
+        print("   detect      - Detect ESP8266 boards via USB")
+        print("   setup-wifi  - Interactive WiFi configuration wizard")
+        print("   discover    - Discover ESP-Linker devices on network")
+        print("   test        - Test ESP-Linker device functionality")
+        print("   dashboard   - Launch web dashboard")
+        print("   reset       - Factory reset ESP-Linker device\n")
 
 def reset_device_cli():
     """Factory reset ESP-Linker device"""

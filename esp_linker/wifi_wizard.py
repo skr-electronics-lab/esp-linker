@@ -2,7 +2,11 @@
 ESP-Linker WiFi Configuration Wizard
 (c) 2025 SK Raihan / SKR Electronics Lab
 
-Interactive WiFi setup wizard that makes WiFi configuration easy and user-friendly.
+Interactive WiFi setup wizard for ESP8266 boards over USB serial.
+Features:
+- Modern Rich TUI with sleek tables and progress bars (zero emojis)
+- Real-time network scanning and RSSI signal quality bars
+- Robust serial handshake with input buffer flush
 """
 
 import serial
@@ -10,27 +14,31 @@ import time
 import getpass
 import re
 from typing import List, Dict, Optional, Tuple
-from .flasher import detect_esp8266
-from .exceptions import DeviceNotFoundError, FlashError
+
+from .flasher import detect_esp8266, ESP8266Flasher, print_badge, ui_print, RICH_AVAILABLE, console
+from .exceptions import DeviceNotFoundError
 
 try:
-    from tqdm import tqdm
-    TQDM_AVAILABLE = True
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
+    from rich import box
 except ImportError:
-    TQDM_AVAILABLE = False
+    pass
 
 
 class WiFiNetwork:
-    """Represents a WiFi network"""
-    
+    """Represents a discovered WiFi network"""
+
     def __init__(self, ssid: str, rssi: int, encrypted: bool):
         self.ssid = ssid
         self.rssi = rssi
         self.encrypted = encrypted
-        self.signal_strength = self._calculate_signal_strength()
-    
-    def _calculate_signal_strength(self) -> int:
-        """Calculate signal strength bars (1-5)"""
+        self.signal_bars = self._calculate_signal_bars()
+
+    def _calculate_signal_bars(self) -> int:
+        """Calculate signal bars 1 to 5 based on dBm"""
         if self.rssi >= -50:
             return 5
         elif self.rssi >= -60:
@@ -41,303 +49,335 @@ class WiFiNetwork:
             return 2
         else:
             return 1
-    
-    def __str__(self):
-        security = "[L]" if self.encrypted else "[U]"
-        signal = "[^]" * self.signal_strength + "[o]" * (5 - self.signal_strength)
-        return f"{self.ssid} {security} {signal} ({self.rssi} dBm)"
+
+    def quality_bar(self) -> str:
+        """Render high-tech text bar for signal quality"""
+        bars = self.signal_bars
+        filled = "█" * bars
+        empty = "░" * (5 - bars)
+        if bars >= 4:
+            return f"[bold green]{filled}[/bold green][dim]{empty}[/dim]"
+        elif bars == 3:
+            return f"[bold yellow]{filled}[/bold yellow][dim]{empty}[/dim]"
+        else:
+            return f"[bold red]{filled}[/bold red][dim]{empty}[/dim]"
 
 
 class WiFiWizard:
     """Interactive WiFi configuration wizard"""
-    
+
     def __init__(self, port: Optional[str] = None, baud_rate: int = 115200):
         self.port = port
         self.baud_rate = baud_rate
         self.serial_connection = None
-    
+
     def _connect_serial(self) -> bool:
-        """Connect to ESP8266 via serial"""
+        """Connect to ESP8266 via USB serial"""
         try:
             if not self.port:
-                # Auto-detect ESP8266
-                ports = detect_esp8266()
-                esp_ports = [p for p in ports if p['likely_esp']]
-                
-                if not esp_ports:
-                    if ports:
-                        print("[!] No ESP8266 detected, but found these ports:")
-                        for i, port in enumerate(ports, 1):
-                            print(f"   {i}. {port['port']} - {port['description']}")
-                        
-                        choice = input("\nSelect port number (or press Enter to skip): ").strip()
-                        if choice.isdigit() and 1 <= int(choice) <= len(ports):
-                            self.port = ports[int(choice) - 1]['port']
-                        else:
-                            return False
-                    else:
+                print_badge("DETECT", "Searching for connected ESP8266 board...")
+                try:
+                    self.port = ESP8266Flasher().auto_detect_port()
+                    print_badge("OK", f"Found board on serial port: [bold cyan]{self.port}[/bold cyan]")
+                except Exception:
+                    ports = detect_esp8266()
+                    if not ports:
                         raise DeviceNotFoundError("No serial ports found")
-                else:
-                    self.port = esp_ports[0]['port']
-                    print(f"[^] Auto-detected ESP8266 on port: {self.port}")
-            
-            # Connect to serial port
+
+                    print_badge("WARN", "Multiple ports found. Please select:")
+                    for i, p in enumerate(ports, 1):
+                        ui_print(f"  {i}. {p['port']} - {p['description']}")
+
+                    choice = input("\nSelect port number: ").strip()
+                    if choice.isdigit() and 1 <= int(choice) <= len(ports):
+                        self.port = ports[int(choice) - 1]['port']
+                    else:
+                        return False
+
+            print_badge("INFO", f"Opening serial connection to {self.port} at {self.baud_rate} baud...")
             self.serial_connection = serial.Serial(self.port, self.baud_rate, timeout=2)
-            time.sleep(1.5)  # Wait for ESP8266 to finish bootloader output
+            time.sleep(1.5)  # Wait for ESP bootloader output to settle
             self.serial_connection.reset_input_buffer()
 
-            # Test connection (send newline first to clear any incomplete command buffer)
+            # Handshake with ESP-Linker firmware
             self._send_command("")
             time.sleep(0.1)
             self._send_command("HELP")
             response = self._read_response(timeout=3)
 
             if "ESP-Linker Serial Commands" in response:
-                print("[+] Serial connection established")
+                print_badge("SUCCESS", "ESP-Linker firmware serial interface confirmed!")
                 return True
             else:
-                print("[!] Connected but ESP-Linker firmware not detected")
-                print("[i] You may need to flash ESP-Linker firmware first")
+                print_badge("WARN", "Connected to port, but ESP-Linker firmware did not respond to HELP.")
+                print_badge("INFO", "If the board is freshly flashed, run: esp-linker flash")
                 return False
-                
+
         except Exception as e:
-            print(f"[!] Serial connection failed: {e}")
+            print_badge("ERROR", f"Serial connection failed: {e}")
             return False
-    
+
     def _send_command(self, command: str):
         """Send command to ESP8266"""
         if self.serial_connection:
             self.serial_connection.write(f"{command}\n".encode())
             self.serial_connection.flush()
-    
+
     def _read_response(self, timeout: int = 5) -> str:
         """Read response from ESP8266"""
         if not self.serial_connection:
             return ""
-        
+
         response = ""
         start_time = time.time()
-        
+
         while time.time() - start_time < timeout:
             if self.serial_connection.in_waiting > 0:
                 data = self.serial_connection.read(self.serial_connection.in_waiting)
                 response += data.decode('utf-8', errors='ignore')
             time.sleep(0.1)
-        
+
         return response
-    
+
     def scan_networks(self) -> List[WiFiNetwork]:
         """Scan for available WiFi networks"""
-        print("[?] Scanning for WiFi networks...")
-        
-        if TQDM_AVAILABLE:
-            # Show scanning progress
-            with tqdm(total=100, desc="[^] Scanning", bar_format='{desc}: {bar} {percentage:3.0f}%') as pbar:
+        print_badge("INFO", "Scanning for 2.4 GHz WiFi networks...")
+
+        if RICH_AVAILABLE and console:
+            with Progress(
+                SpinnerColumn(spinner_name="dots", style="bold cyan"),
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(bar_width=30, style="grey23", complete_style="bold cyan"),
+                TimeElapsedColumn(),
+                console=console,
+                transient=True
+            ) as progress:
+                task = progress.add_task("Querying ESP8266 WiFi scan...", total=100)
                 self._send_command("WIFI_SCAN")
-                
-                for i in range(100):
-                    pbar.update(1)
-                    time.sleep(0.05)  # 5 second total scan time
+
+                for _ in range(50):
+                    progress.update(task, advance=2)
+                    time.sleep(0.08)
         else:
             self._send_command("WIFI_SCAN")
-            time.sleep(5)
-        
-        response = self._read_response(timeout=10)
+            time.sleep(4.0)
+
+        response = self._read_response(timeout=8)
         networks = self._parse_scan_results(response)
-        
-        print(f"[+] Found {len(networks)} networks")
+
+        print_badge("OK", f"Found {len(networks)} visible network(s)")
         return networks
-    
+
     def _parse_scan_results(self, response: str) -> List[WiFiNetwork]:
-        """Parse WiFi scan results from ESP8266 response"""
+        """Parse WiFi scan results from ESP8266 serial output"""
         networks = []
-        lines = response.split('\n')
-        
+        lines = response.splitlines()
+
         for line in lines:
-            # Parse format: "1: NetworkName (-45 dBm) [Secured]"
+            # Matches: "1: NetworkName (-45 dBm) [Secured]"
             match = re.match(r'\d+:\s*(.+?)\s*\((-?\d+)\s*dBm\)\s*\[(.*?)\]', line.strip())
             if match:
                 ssid = match.group(1).strip()
                 rssi = int(match.group(2))
                 security = match.group(3).strip()
                 encrypted = security.lower() != 'open'
-                
                 networks.append(WiFiNetwork(ssid, rssi, encrypted))
-        
-        # Sort by signal strength (strongest first)
+
         networks.sort(key=lambda n: n.rssi, reverse=True)
         return networks
-    
+
     def display_networks(self, networks: List[WiFiNetwork]) -> int:
-        """Display available networks and get user selection"""
-        print("\n[^] Available WiFi Networks:")
-        print("=" * 50)
-        
-        for i, network in enumerate(networks, 1):
-            print(f"{i:2d}. {network}")
-        
-        print(f"{len(networks) + 1:2d}. [~] Rescan networks")
-        print(f"{len(networks) + 2:2d}. [K]  Enter SSID manually")
-        print(f"{len(networks) + 3:2d}. [!] Cancel")
-        
+        """Display discovered networks in a clean table"""
+        if RICH_AVAILABLE and console:
+            table = Table(
+                title="Visible WiFi Networks (2.4 GHz)",
+                box=box.ROUNDED,
+                header_style="bold cyan",
+                border_style="cyan"
+            )
+            table.add_column("#", style="dim", width=4)
+            table.add_column("SSID", style="bold white", width=26)
+            table.add_column("Signal (dBm)", justify="right", width=12)
+            table.add_column("Quality", justify="center", width=10)
+            table.add_column("Security", justify="center", width=12)
+
+            for i, net in enumerate(networks, 1):
+                sec_str = "[yellow]WPA/WPA2[/yellow]" if net.encrypted else "[green]Open[/green]"
+                table.add_row(
+                    str(i),
+                    net.ssid,
+                    f"{net.rssi} dBm",
+                    net.quality_bar(),
+                    sec_str
+                )
+
+            console.print(table)
+            ui_print("[dim]Options: [bold white][R][/bold white] Rescan | [bold white][M][/bold white] Manual SSID | [bold white][Q][/bold white] Cancel[/dim]")
+        else:
+            print("\nAvailable WiFi Networks:")
+            print("-" * 50)
+            for i, net in enumerate(networks, 1):
+                sec = "Secured" if net.encrypted else "Open"
+                print(f" {i:2d}. {net.ssid:<25} ({net.rssi} dBm) [{sec}]")
+            print("-" * 50)
+            print(" [R] Rescan | [M] Manual Entry | [Q] Cancel\n")
+
         while True:
-            try:
-                choice = input(f"\nSelect network (1-{len(networks) + 3}): ").strip()
-                
-                if not choice:
-                    continue
-                
-                choice_num = int(choice)
-                
-                if 1 <= choice_num <= len(networks):
-                    return choice_num - 1  # Return network index
-                elif choice_num == len(networks) + 1:
-                    return -1  # Rescan
-                elif choice_num == len(networks) + 2:
-                    return -2  # Manual entry
-                elif choice_num == len(networks) + 3:
-                    return -3  # Cancel
-                else:
-                    print("[!] Invalid choice. Please try again.")
-                    
-            except ValueError:
-                print("[!] Please enter a valid number.")
-    
+            choice = input("\nSelect network option: ").strip()
+            if not choice:
+                continue
+
+            lower = choice.lower()
+            if lower == 'r':
+                return -1
+            elif lower == 'm':
+                return -2
+            elif lower in ['q', 'cancel', 'exit']:
+                return -3
+
+            if choice.isdigit():
+                val = int(choice)
+                if 1 <= val <= len(networks):
+                    return val - 1
+
+            print_badge("WARN", "Invalid selection. Enter network number, R, M, or Q.")
+
     def get_manual_network(self) -> Tuple[str, str]:
-        """Get network details manually from user"""
-        print("\n[K] Manual Network Entry")
-        print("=" * 30)
-        
-        ssid = input("[^] Enter WiFi SSID: ").strip()
+        """Prompt user for manual SSID and password"""
+        ui_print("\n[bold cyan]Manual WiFi Configuration[/bold cyan]")
+        ssid = input("Enter WiFi SSID: ").strip()
         if not ssid:
             raise ValueError("SSID cannot be empty")
-        
-        password = getpass.getpass("[K] Enter WiFi password (or press Enter for open network): ")
-        
+
+        password = getpass.getpass("Enter WiFi password (or press Enter if open): ")
         return ssid, password
-    
+
     def configure_wifi(self, ssid: str, password: str) -> bool:
-        """Configure WiFi on ESP8266"""
-        print(f"\n[*] Configuring WiFi: {ssid}")
-        
-        # Send WiFi configuration command
+        """Send credentials to ESP8266 and await connection confirmation"""
+        print_badge("INFO", f"Sending credentials for SSID: [bold white]{ssid}[/bold white]")
+
+        # Send command to ESP
         config_command = f"WIFI_CONFIG:{ssid},{password}"
         self._send_command(config_command)
-        
-        print("[.] Connecting to WiFi...")
-        
-        if TQDM_AVAILABLE:
-            # Show connection progress
-            with tqdm(total=100, desc="[*] Connecting", bar_format='{desc}: {bar} {percentage:3.0f}%') as pbar:
-                for i in range(100):
-                    pbar.update(1)
-                    time.sleep(0.15)  # 15 second timeout
+
+        print_badge("WAIT", "ESP8266 connecting to WiFi network...")
+
+        if RICH_AVAILABLE and console:
+            with Progress(
+                SpinnerColumn(spinner_name="dots", style="bold cyan"),
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(bar_width=30, style="grey23", complete_style="bold green"),
+                TimeElapsedColumn(),
+                console=console,
+                transient=True
+            ) as progress:
+                task = progress.add_task(f"Connecting to {ssid}...", total=100)
+                for _ in range(70):
+                    progress.update(task, advance=1.4)
+                    time.sleep(0.15)
         else:
-            time.sleep(15)
-        
-        # Read connection result
-        response = self._read_response(timeout=5)
-        
+            time.sleep(12.0)
+
+        response = self._read_response(timeout=6)
+
         if "SUCCESS: WiFi connected!" in response:
-            # Extract IP address
             ip_match = re.search(r'IP Address: ([\d.]+)', response)
             ip_address = ip_match.group(1) if ip_match else "Unknown"
-            
-            print(f"[+] WiFi connected successfully!")
-            print(f"[^] IP Address: {ip_address}")
-            
-            # Get signal strength
+
             signal_match = re.search(r'Signal Strength: (-?\d+) dBm', response)
-            if signal_match:
-                signal = int(signal_match.group(1))
-                print(f"[^] Signal Strength: {signal} dBm")
-            
+            signal_dbm = signal_match.group(1) if signal_match else "N/A"
+
+            if RICH_AVAILABLE and console:
+                summary = Text()
+                summary.append("[SUCCESS] WiFi Connection Established!\n\n", style="bold green")
+                summary.append("  SSID:            ", style="dim white")
+                summary.append(f"{ssid}\n", style="bold white")
+                summary.append("  Assigned IP:     ", style="dim white")
+                summary.append(f"{ip_address}\n", style="bold cyan")
+                summary.append("  Signal Strength: ", style="dim white")
+                summary.append(f"{signal_dbm} dBm\n", style="white")
+
+                panel = Panel(summary, box=box.ROUNDED, border_style="green", expand=False)
+                console.print(panel)
+            else:
+                print("\n[SUCCESS] WiFi connected successfully!")
+                print(f"  SSID:        {ssid}")
+                print(f"  Assigned IP: {ip_address}")
+                print(f"  Signal:      {signal_dbm} dBm\n")
+
             return True
         else:
-            print("[!] WiFi connection failed!")
-            print("[i] Please check SSID and password")
+            print_badge("ERROR", "WiFi connection failed! Check SSID spelling and password.")
             return False
-    
+
     def run_wizard(self) -> bool:
-        """Run the complete WiFi configuration wizard"""
-        print("[*] ESP-Linker WiFi Configuration Wizard")
-        print("=" * 50)
-        print("This wizard will help you configure WiFi on your ESP8266")
-        print("Make sure your ESP8266 is connected via USB and running ESP-Linker firmware")
-        print()
-        
-        # Step 1: Connect to ESP8266
+        """Run the complete interactive WiFi wizard"""
+        if RICH_AVAILABLE and console:
+            banner = Text()
+            banner.append("ESP-LINKER WIFI WIZARD\n", style="bold cyan")
+            banner.append("Configure ESP8266 WiFi Credentials via USB Serial", style="dim white")
+            panel = Panel(banner, box=box.ROUNDED, border_style="cyan", expand=False)
+            console.print(panel)
+        else:
+            print("=" * 60)
+            print(" ESP-LINKER WIFI WIZARD ")
+            print("=" * 60)
+
         if not self._connect_serial():
-            print("[!] Cannot proceed without serial connection")
             return False
-        
+
         try:
             while True:
-                # Step 2: Scan for networks
                 networks = self.scan_networks()
-                
+
                 if not networks:
-                    print("[!] No WiFi networks found")
-                    retry = input("[~] Try scanning again? (y/N): ").strip().lower()
+                    print_badge("WARN", "No WiFi networks found in range.")
+                    retry = input("Try scanning again? (y/N): ").strip().lower()
                     if retry != 'y':
                         return False
                     continue
-                
-                # Step 3: Display networks and get selection
+
                 choice = self.display_networks(networks)
-                
+
                 if choice == -1:  # Rescan
                     continue
                 elif choice == -2:  # Manual entry
                     try:
                         ssid, password = self.get_manual_network()
                     except ValueError as e:
-                        print(f"[!] {e}")
+                        print_badge("ERROR", str(e))
                         continue
                 elif choice == -3:  # Cancel
-                    print("[!] WiFi configuration cancelled")
+                    print_badge("INFO", "WiFi configuration cancelled by user.")
                     return False
                 else:  # Network selected
                     selected_network = networks[choice]
                     ssid = selected_network.ssid
-                    
+
                     if selected_network.encrypted:
-                        password = getpass.getpass(f"[K] Enter password for '{ssid}': ")
+                        password = getpass.getpass(f"Enter password for '{ssid}': ")
                     else:
                         password = ""
-                        print(f"[U] Connecting to open network '{ssid}'")
-                
-                # Step 4: Configure WiFi
+                        print_badge("INFO", f"Connecting to open network '{ssid}'")
+
                 if self.configure_wifi(ssid, password):
-                    print("\n[*] WiFi configuration completed successfully!")
-                    print("[=] Next steps:")
-                    print("   1. Your ESP8266 is now connected to WiFi")
-                    print("   2. You can now use the Python library:")
-                    print("      from esp_linker import connect_auto")
-                    print("      board = connect_auto()")
+                    ui_print("\n[bold green]Ready for Python Control![/bold green]")
+                    ui_print("Run in Python:\n  [bold cyan]from esp_linker import connect_auto[/bold cyan]\n  [bold cyan]board = connect_auto()[/bold cyan]\n")
                     return True
                 else:
-                    retry = input("\n[~] Try again with different credentials? (y/N): ").strip().lower()
+                    retry = input("\nTry again with different credentials? (y/N): ").strip().lower()
                     if retry != 'y':
                         return False
-        
+
         finally:
             if self.serial_connection:
                 self.serial_connection.close()
-                print("[*] Serial connection closed")
-        
+                print_badge("INFO", "Serial connection closed.")
+
         return False
 
 
 def run_wifi_wizard(port: Optional[str] = None) -> bool:
-    """
-    Run the WiFi configuration wizard.
-    
-    Args:
-        port: Serial port (auto-detected if None)
-        
-    Returns:
-        True if WiFi was configured successfully
-    """
+    """Run the WiFi configuration wizard"""
     wizard = WiFiWizard(port)
     return wizard.run_wizard()

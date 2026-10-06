@@ -2,9 +2,13 @@
 ESP-Linker Firmware Flasher
 (c) 2025 SK Raihan / SKR Electronics Lab
 
-Firmware flashing functionality using esptool for ESP8266 boards.
-Includes bundled firmware, robust automatic port detection, real-time progress,
-and automatic baud-rate fallback.
+High-performance firmware flashing engine for ESP8266 boards.
+Features:
+- Sleek, modern terminal UI (Rich engine, zero emojis, clean engineering aesthetic)
+- Real-time output streaming (deadlock-free subprocess architecture)
+- Single-pass atomic write with flash erase
+- Intelligent port detection (filters system ports, prioritizes ESP USB chips)
+- Automatic high-speed baud detection with graceful fallback (460800 -> 115200)
 """
 
 import os
@@ -22,61 +26,118 @@ from .exceptions import FlashError, DeviceNotFoundError
 
 logger = get_logger(__name__)
 
+# Terminal UI Engine
 try:
-    from tqdm import tqdm
-    TQDM_AVAILABLE = True
+    from rich.console import Console
+    from rich.progress import (
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        BarColumn,
+        TaskProgressColumn,
+        TimeElapsedColumn,
+    )
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    from rich import box
+    RICH_AVAILABLE = True
+    console = Console()
 except ImportError:
-    TQDM_AVAILABLE = False
+    RICH_AVAILABLE = False
+    console = None
+
+
+def ui_print(message: str, style: str = ""):
+    """Print message with Rich styling or fallback to plain text (NO emojis)"""
+    if RICH_AVAILABLE and console:
+        console.print(message, style=style if style else None)
+    else:
+        # Strip simple rich markup if fallback
+        clean_text = re.sub(r'\[/?[a-zA-Z0-9_\s#]+\]', '', message)
+        print(clean_text)
+
+
+def print_badge(level: str, message: str):
+    """Print a standardized, styled badge without emojis"""
+    badges = {
+        "INFO": "[bold cyan][INFO][/bold cyan]",
+        "OK": "[bold green][OK][/bold green]",
+        "SUCCESS": "[bold green][SUCCESS][/bold green]",
+        "WAIT": "[bold yellow][WAIT][/bold yellow]",
+        "WARN": "[bold yellow][WARN][/bold yellow]",
+        "ERROR": "[bold red][ERROR][/bold red]",
+        "FLASH": "[bold blue][FLASH][/bold blue]",
+        "DETECT": "[bold magenta][DETECT][/bold magenta]",
+        "RETRY": "[bold yellow][RETRY][/bold yellow]",
+    }
+    badge = badges.get(level.upper(), f"[{level.upper()}]")
+    ui_print(f"{badge} {message}")
+
+
+def render_banner(title: str = "ESP-LINKER FIRMWARE FLASHER", subtitle: str = "SKR Electronics Lab"):
+    """Render a clean, high-tech header banner without emojis"""
+    if RICH_AVAILABLE and console:
+        content = Text()
+        content.append(f"{title}\n", style="bold cyan")
+        content.append(f"{subtitle} | Universal Wireless GPIO Platform", style="dim white")
+        panel = Panel(content, box=box.ROUNDED, border_style="cyan", expand=False)
+        console.print(panel)
+    else:
+        print("=" * 60)
+        print(f" {title} ")
+        print(f" {subtitle} ")
+        print("=" * 60)
 
 
 class ProgressTracker:
-    """Enhanced progress tracking with visual progress bars"""
+    """Modern progress tracking with smooth Rich bars or clean plain text"""
 
     def __init__(self, use_progress_bar: bool = True):
-        self.use_progress_bar = use_progress_bar and TQDM_AVAILABLE
-        self.current_progress = None
+        self.use_progress_bar = use_progress_bar and RICH_AVAILABLE
+        self.progress = None
+        self.task_id = None
 
     def start_operation(self, description: str, total: int = 100):
         """Start a new operation with progress tracking"""
-        if self.use_progress_bar:
-            self.current_progress = tqdm(
-                total=total,
-                desc=description,
-                unit="%",
-                bar_format="{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}]"
+        if self.use_progress_bar and console:
+            self.progress = Progress(
+                SpinnerColumn(spinner_name="dots", style="bold cyan"),
+                TextColumn("[bold cyan]{task.description}"),
+                BarColumn(bar_width=36, style="grey23", complete_style="bold cyan", finished_style="bold green"),
+                TaskProgressColumn("[bold white]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                console=console,
+                transient=False
             )
+            self.progress.start()
+            self.task_id = self.progress.add_task(description, total=total)
         else:
-            print(f"[*] {description}...")
+            print_badge("INFO", f"{description}...")
 
     def update_to(self, percentage: int, message: Optional[str] = None):
         """Update progress bar to specific percentage"""
-        if self.current_progress:
-            delta = percentage - self.current_progress.n
-            if delta > 0:
-                self.current_progress.update(delta)
-            if message:
-                self.current_progress.set_description(message)
+        if self.progress and self.task_id is not None:
+            self.progress.update(
+                self.task_id,
+                completed=min(percentage, 100),
+                description=message or "Flashing firmware"
+            )
         elif message:
-            print(f"[*] {message}")
+            print_badge("INFO", message)
 
     def finish_operation(self, success_message: str):
         """Finish current operation"""
-        if self.current_progress:
-            if self.current_progress.n < self.current_progress.total:
-                self.current_progress.update(self.current_progress.total - self.current_progress.n)
-            self.current_progress.close()
-            self.current_progress = None
-        print(f"[+] {success_message}")
-
-    def simple_message(self, message: str):
-        """Display a simple message"""
-        print(message)
+        if self.progress and self.task_id is not None:
+            self.progress.update(self.task_id, completed=100)
+            self.progress.stop()
+            self.progress = None
+        print_badge("SUCCESS", success_message)
 
 
 class ESP8266Flasher:
     """ESP8266 firmware flasher using esptool"""
 
-    # Flash parameters
     DEFAULT_BAUD_RATE = 460800
     FALLBACK_BAUD_RATE = 115200
     DEFAULT_FLASH_SIZE = "4MB"
@@ -91,7 +152,7 @@ class ESP8266Flasher:
 
     def _get_firmware_path(self) -> str:
         """Get the path to the bundled firmware using modern resource lookup"""
-        # 1. Try standard pathlib lookup relative to module file
+        # 1. Path relative to module file
         current_dir = Path(__file__).resolve().parent
         firmware_path = current_dir / "firmware" / "esp-linker-firmware.bin"
         if firmware_path.exists():
@@ -127,7 +188,6 @@ class ESP8266Flasher:
         esp_ports = []
         ports = list(serial.tools.list_ports.comports())
 
-        # Common ESP USB-to-Serial identifiers
         esp_identifiers = [
             'CH340',
             'CP210',
@@ -142,7 +202,6 @@ class ESP8266Flasher:
         ]
 
         for port in ports:
-            # Skip built-in motherboard legacy ports
             hwid_upper = (port.hwid or "").upper()
             if "PNP0501" in hwid_upper:
                 continue
@@ -156,7 +215,6 @@ class ESP8266Flasher:
                     likely_esp = True
                     break
 
-            # If it's a USB device, it might be an ESP board
             is_usb = "USB" in hwid_upper or "VID:PID" in hwid_upper
 
             esp_ports.append({
@@ -168,7 +226,6 @@ class ESP8266Flasher:
                 'is_usb': is_usb
             })
 
-        # Sort: likely ESP first, then general USB ports
         esp_ports.sort(key=lambda x: (x['likely_esp'], x['is_usb']), reverse=True)
         return esp_ports
 
@@ -178,37 +235,87 @@ class ESP8266Flasher:
 
         Returns:
             Port name (e.g., 'COM3', '/dev/ttyUSB0')
-
-        Raises:
-            DeviceNotFoundError: If no suitable port found
         """
         ports = self.detect_esp8266_ports()
 
         if not ports:
-            raise DeviceNotFoundError("No USB serial ports found. Please connect your ESP8266 board via USB.")
+            raise DeviceNotFoundError("No USB serial ports detected. Connect your ESP8266 board via USB.")
 
-        # If any port matches our ESP identifiers
         for p in ports:
             if p['likely_esp']:
                 return p['port']
 
-        # If only one USB port is connected, pick it
         usb_ports = [p for p in ports if p['is_usb']]
         if len(usb_ports) == 1:
             return usb_ports[0]['port']
 
-        # Otherwise, report available ports
         avail = [f"{p['port']} ({p['description']})" for p in ports]
         raise DeviceNotFoundError(
             f"Could not automatically identify ESP8266. Available ports: {', '.join(avail)}. "
-            f"Please specify the port manually using --port <PORT>."
+            f"Specify port manually with --port <PORT>."
         )
+
+    def display_ports_table(self):
+        """Display discovered ports in a clean Rich table without emojis"""
+        ports = self.detect_esp8266_ports()
+        if not ports:
+            print_badge("WARN", "No serial ports found")
+            return
+
+        if RICH_AVAILABLE and console:
+            table = Table(
+                title="Available Serial Ports",
+                box=box.ROUNDED,
+                header_style="bold cyan",
+                border_style="cyan"
+            )
+            table.add_column("#", style="dim", width=4)
+            table.add_column("Port", style="bold white", width=12)
+            table.add_column("Description", style="white")
+            table.add_column("Manufacturer", style="dim")
+            table.add_column("Likely ESP8266", justify="center")
+
+            for i, p in enumerate(ports, 1):
+                indicator = "[bold green]YES[/bold green]" if p['likely_esp'] else "[dim]NO[/dim]"
+                table.add_row(str(i), p['port'], p['description'], p['manufacturer'], indicator)
+
+            console.print(table)
+        else:
+            print("\nAvailable Serial Ports:")
+            print("-" * 50)
+            for i, p in enumerate(ports, 1):
+                flag = "[ESP8266 MATCH]" if p['likely_esp'] else ""
+                print(f"{i}. {p['port']} - {p['description']} {flag}")
+            print()
+
+    def display_flash_summary(self, port: str, baud_rate: int):
+        """Display configuration summary table before flashing"""
+        firmware_size = os.path.getsize(self.firmware_path)
+        firmware_size_kb = firmware_size / 1024
+
+        if RICH_AVAILABLE and console:
+            table = Table(box=box.ROUNDED, border_style="cyan", show_header=False)
+            table.add_column("Parameter", style="bold cyan", width=18)
+            table.add_column("Value", style="white")
+
+            table.add_row("Target Architecture", "ESP8266 (NodeMCU / Generic)")
+            table.add_row("Serial Port", port)
+            table.add_row("Baud Rate", f"{baud_rate} bps")
+            table.add_row("Flash Mode", f"{self.DEFAULT_FLASH_MODE.upper()} / 40MHz")
+            table.add_row("Firmware Binary", f"{firmware_size_kb:.1f} KB ({self.firmware_path})")
+            table.add_row("Flash Address", self.FLASH_ADDRESS)
+
+            panel = Panel(table, title="[bold white]Flash Configuration[/bold white]", box=box.ROUNDED, border_style="cyan")
+            console.print(panel)
+        else:
+            print("-" * 50)
+            print(f"Target: ESP8266 | Port: {port} | Baud: {baud_rate}")
+            print(f"Firmware: {firmware_size_kb:.1f} KB | Addr: {self.FLASH_ADDRESS}")
+            print("-" * 50)
 
     def _execute_flash(self, port: str, baud_rate: int, erase_flash: bool,
                        progress: ProgressTracker, progress_callback: Optional[Callable] = None) -> bool:
-        """Execute esptool flash with real-time output parsing to prevent pipe deadlock"""
-        # Determine esptool commands based on installed esptool
-        # write-flash with --erase-all handles both erasing and writing in a single clean pass!
+        """Execute esptool flash with real-time output parsing to prevent deadlock"""
         cmd = [
             sys.executable, "-m", "esptool",
             "--chip", "esp8266",
@@ -227,9 +334,8 @@ class ESP8266Flasher:
 
         cmd.extend([self.FLASH_ADDRESS, self.firmware_path])
 
-        progress.start_operation(f"Connecting to ESP8266 at {baud_rate} baud & flashing", total=100)
+        progress.start_operation(f"Connecting ({baud_rate} baud) & Writing Flash", total=100)
 
-        # Launch process and read output in real-time
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -249,17 +355,16 @@ class ESP8266Flasher:
                 if progress_callback:
                     progress_callback(clean_line)
 
-                # Check for progress percentage (e.g. "Writing at 0x00010000... (32 %)")
                 match = percent_pattern.search(clean_line)
                 if match:
                     pct = int(match.group(1))
-                    progress.update_to(pct, f"Writing firmware: {pct}%")
+                    progress.update_to(pct, f"Writing blocks: {pct}%")
                 elif "Erasing flash" in clean_line:
-                    progress.update_to(10, "Erasing flash memory...")
+                    progress.update_to(10, "Erasing flash sectors...")
                 elif "Connecting" in clean_line:
-                    progress.update_to(5, "Connecting to board...")
+                    progress.update_to(5, "Syncing with bootloader...")
                 elif "Hash of data verified" in clean_line:
-                    progress.update_to(100, "Verification complete!")
+                    progress.update_to(100, "Verifying flash image...")
 
             process.stdout.close()
             process.wait()
@@ -270,12 +375,11 @@ class ESP8266Flasher:
         full_log = "".join(all_output)
 
         if process.returncode != 0:
-            # Check for connection timeout
             if "Timed out waiting for packet header" in full_log or "Failed to connect" in full_log:
                 raise TimeoutError(f"Connection timed out at {baud_rate} baud.\n{full_log}")
-            raise FlashError(f"Flashing failed (code {process.returncode}):\n{full_log}")
+            raise FlashError(f"Flashing failed with exit code {process.returncode}:\n{full_log}")
 
-        progress.finish_operation("Firmware flashed and verified successfully!")
+        progress.finish_operation("Firmware successfully written and verified!")
         return True
 
     def flash_firmware(self,
@@ -287,62 +391,66 @@ class ESP8266Flasher:
                        use_progress_bar: bool = True) -> bool:
         """
         Flash ESP-Linker firmware to ESP8266 with automatic baud fallback and deadlock prevention.
-
-        Args:
-            port: Serial port (auto-detected if None)
-            baud_rate: Flash baud rate (default: 460800)
-            erase_flash: Whether to erase flash before flashing
-            verify: Whether to verify flash after writing
-            progress_callback: Callback function for progress updates
-            use_progress_bar: Whether to use visual progress bars
-
-        Returns:
-            True if successful
         """
-        progress = ProgressTracker(use_progress_bar)
+        render_banner()
 
-        # Auto-detect port if not provided
+        # Port detection
         if port is None:
-            progress.simple_message("[?] Auto-detecting ESP8266...")
+            print_badge("DETECT", "Auto-detecting connected ESP8266 board...")
             port = self.auto_detect_port()
-            progress.simple_message(f"[^] Found ESP8266 on port: {port}")
+            print_badge("OK", f"Detected board on serial port: [bold cyan]{port}[/bold cyan]")
+        else:
+            print_badge("INFO", f"Using specified serial port: [bold cyan]{port}[/bold cyan]")
 
         if not os.path.exists(self.firmware_path):
-            raise FlashError(f"Firmware binary not found: {self.firmware_path}")
+            raise FlashError(f"Firmware binary missing: {self.firmware_path}")
 
-        firmware_size = os.path.getsize(self.firmware_path)
-        progress.simple_message(f"[+] Firmware binary: {firmware_size:,} bytes ({firmware_size/1024:.1f} KB)")
+        self.display_flash_summary(port, baud_rate)
 
-        # Try flashing at requested baud rate
+        progress = ProgressTracker(use_progress_bar)
+
         try:
-            return self._execute_flash(port, baud_rate, erase_flash, progress, progress_callback)
+            success = self._execute_flash(port, baud_rate, erase_flash, progress, progress_callback)
         except TimeoutError as e:
-            # If high baud failed, try fallback rate
             if baud_rate != self.FALLBACK_BAUD_RATE:
-                progress.simple_message(f"[!] High-speed baud rate ({baud_rate}) timed out.")
-                progress.simple_message(f"[~] Retrying at safe baud rate ({self.FALLBACK_BAUD_RATE})...")
+                print_badge("WARN", f"High-speed baud rate ({baud_rate}) timed out.")
+                print_badge("RETRY", f"Retrying at safe baud rate ({self.FALLBACK_BAUD_RATE} bps)...")
                 time.sleep(1.0)
-                return self._execute_flash(port, self.FALLBACK_BAUD_RATE, erase_flash, progress, progress_callback)
-            raise FlashError(str(e))
+                success = self._execute_flash(port, self.FALLBACK_BAUD_RATE, erase_flash, progress, progress_callback)
+            else:
+                raise FlashError(str(e))
         except FlashError:
             raise
         except Exception as e:
-            raise FlashError(f"Flashing failed: {e}")
+            raise FlashError(f"Flash execution failed: {e}")
+
+        # Post-flash clean summary
+        if success:
+            if RICH_AVAILABLE and console:
+                panel_text = Text()
+                panel_text.append("[SUCCESS] ESP-Linker firmware installed successfully!\n\n", style="bold green")
+                panel_text.append("Next Steps:\n", style="bold white")
+                panel_text.append(" 1. Run WiFi Wizard:   ", style="cyan")
+                panel_text.append("esp-linker setup-wifi\n", style="bold white")
+                panel_text.append(" 2. Discover Devices: ", style="cyan")
+                panel_text.append("esp-linker discover\n", style="bold white")
+                panel_text.append(" 3. Start Python:     ", style="cyan")
+                panel_text.append("from esp_linker import connect_auto\n", style="bold white")
+                panel = Panel(panel_text, box=box.ROUNDED, border_style="green", expand=False)
+                console.print(panel)
+            else:
+                print("\n[SUCCESS] Firmware installed successfully!")
+                print("Next Steps:")
+                print("  1. esp-linker setup-wifi")
+                print("  2. esp-linker discover")
+
+        return success
 
     def get_chip_info(self, port: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Get ESP8266 chip information.
-
-        Args:
-            port: Serial port (auto-detected if None)
-
-        Returns:
-            Dictionary with chip information
-        """
+        """Get ESP8266 chip information"""
         if port is None:
             port = self.auto_detect_port()
 
-        # Try chip-id or chip_id
         cmd = [
             sys.executable, "-m", "esptool",
             "--chip", "esp8266",
@@ -353,12 +461,11 @@ class ESP8266Flasher:
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            # Fallback to legacy syntax
             cmd[-1] = "chip_id"
             result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
-            raise FlashError(f"Failed to get chip info: {result.stderr or result.stdout}")
+            raise FlashError(f"Failed to query chip info: {result.stderr or result.stdout}")
 
         output = result.stdout
         chip_info = {
@@ -378,7 +485,7 @@ class ESP8266Flasher:
         return chip_info
 
     def get_firmware_info(self) -> Dict[str, Any]:
-        """Get information about the bundled firmware"""
+        """Get bundled firmware metadata"""
         if not os.path.exists(self.firmware_path):
             raise FlashError("Firmware binary not found")
 
