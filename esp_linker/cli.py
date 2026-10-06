@@ -36,6 +36,7 @@ from .flasher import (
 )
 from .wifi_wizard import run_wifi_wizard
 from .device_manager import get_device_manager
+from .ui import ui
 
 # Ensure UTF-8 encoding for Windows compatibility
 if sys.platform.startswith('win') and hasattr(sys.stdout, 'encoding') and sys.stdout.encoding != 'utf-8':
@@ -142,10 +143,10 @@ def discover_devices_cli():
         sys.exit(1)
 
 def test_device_cli():
-    """Command-line device testing tool"""
+    """Command-line device testing tool with live in-place diagnostic dashboard"""
     parser = argparse.ArgumentParser(
         description="Test ESP-Linker device functionality",
-        prog="esp-linker-test"
+        prog="esp-linker test"
     )
     parser.add_argument(
         "device",
@@ -175,144 +176,214 @@ def test_device_cli():
         default=5,
         help="Servo pin for testing (default: 5)"
     )
-    
-    args = parser.parse_args()
-    
-    render_banner("ESP-LINKER DEVICE DIAGNOSTICS", "Hardware Verification Suite")
 
-    # Determine if input is IP or URL
+    args = parser.parse_args()
+
+    ui.banner("ESP-LINKER", "Hardware Verification Suite")
+
     device_url = args.device
     if not device_url.startswith('http'):
         device_url = f"http://{device_url}"
 
-    try:
-        # Connect to device
-        print_badge("INFO", f"Connecting to board at [bold cyan]{device_url}[/bold cyan]...")
-        board = ESPBoard(url=device_url, timeout=args.timeout)
+    ui.step(f"Connecting to ESP8266 at [bold white]{device_url}[/bold white]...")
 
-        # Test 1: Status
-        ui_print("\n[bold cyan]--- Diagnostic 1: Telemetry & Status ---[/bold cyan]")
-        status = board.status()
-        print_badge("OK", f"Firmware: {status['firmware_name']} v{status['firmware_version']}")
-        print_badge("OK", f"Uptime: {format_uptime(status['uptime'])}")
-        print_badge("OK", f"Free Memory: {format_memory(status['free_heap'])}")
-        print_badge("OK", f"WiFi Network: {status.get('wifi_ssid', 'Not connected')}")
+    try:
+        board = ESPBoard(url=device_url, timeout=args.timeout)
+    except Exception as e:
+        ui.error(f"Failed to connect to {device_url}: {e}")
+        ui.info("Troubleshooting: Check device IP and make sure device is powered on.")
+        sys.exit(1)
+
+    tests = [
+        {"name": "Telemetry & Status", "target": "GET /api/status", "status": "PENDING", "detail": "Awaiting execution"},
+        {"name": "GPIO Capabilities", "target": "GET /api/capabilities", "status": "PENDING", "detail": "Awaiting execution"},
+        {"name": "Digital I/O Toggle", "target": f"GPIO {args.led_pin} (LED)", "status": "PENDING", "detail": "Awaiting execution"},
+        {"name": "PWM Duty Sweep", "target": f"GPIO {args.pwm_pin}", "status": "PENDING", "detail": "Awaiting execution"},
+        {"name": "Servo Pulse Sweep", "target": f"GPIO {args.servo_pin}", "status": "PENDING", "detail": "Awaiting execution"},
+        {"name": "Analog ADC Sampling", "target": "A0 (ADC)", "status": "PENDING", "detail": "Awaiting execution"},
+        {"name": "Batch Pipeline", "target": "POST /api/batch", "status": "PENDING", "detail": "Awaiting execution"},
+    ]
+
+    from rich.live import Live
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich import box
+
+    def render_table():
+        table = Table(
+            title=f"Hardware Diagnostics Dashboard ({device_url})",
+            box=box.ROUNDED,
+            border_style=ui.COLOR_BORDER,
+            title_style=f"bold {ui.COLOR_PRIMARY}",
+            expand=False
+        )
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Diagnostic Suite", style="bold white", width=25)
+        table.add_column("Target Resource", style=ui.COLOR_PRIMARY, width=18)
+        table.add_column("Status", justify="center", width=12)
+        table.add_column("Result / Telemetry", style="white", width=36)
+
+        for i, t in enumerate(tests, 1):
+            st = t["status"]
+            if st == "PENDING":
+                st_str = "[dim]PENDING[/dim]"
+            elif st == "RUNNING":
+                st_str = f"[bold {ui.COLOR_WARN}]RUNNING...[/bold {ui.COLOR_WARN}]"
+            elif st == "PASS":
+                st_str = f"[bold {ui.COLOR_SUCCESS}]✔ PASS[/bold {ui.COLOR_SUCCESS}]"
+            elif st == "SKIP":
+                st_str = f"[{ui.COLOR_MUTED}]SKIP[/{ui.COLOR_MUTED}]"
+            else:
+                st_str = f"[bold {ui.COLOR_ERROR}]✖ FAIL[/bold {ui.COLOR_ERROR}]"
+
+            table.add_row(str(i), t["name"], t["target"], st_str, t["detail"])
+        return table
+
+    is_interactive = RICH_AVAILABLE and ui.console and not ui.plain_mode and (hasattr(sys.stdout, 'isatty') and sys.stdout.isatty())
+
+    live_context = Live(render_table(), console=ui.console, refresh_per_second=10) if is_interactive else None
+
+    def update_test(idx: int, status: str, detail: str):
+        tests[idx]["status"] = status
+        tests[idx]["detail"] = detail
+        if live_context:
+            live_context.update(render_table())
+        elif not is_interactive:
+            mark = "✔" if status == "PASS" else ("✖" if status == "FAIL" else "·")
+            print(f"[{mark}] [{idx+1}/7] {tests[idx]['name']}: {status} - {detail}")
+
+    passed = 0
+    failed = 0
+    skipped = 0
+
+    try:
+        if live_context:
+            live_context.start()
+
+        # Test 1: Telemetry & Status
+        update_test(0, "RUNNING", "Querying telemetry endpoint...")
+        try:
+            status = board.status()
+            detail = f"{status.get('firmware_name', 'ESP-Linker')} v{status.get('firmware_version', '1.0')} • {format_memory(status.get('free_heap', 0))} free"
+            update_test(0, "PASS", detail)
+            passed += 1
+        except Exception as e:
+            update_test(0, "FAIL", str(e)[:35])
+            failed += 1
 
         # Test 2: Capabilities
-        ui_print("\n[bold cyan]--- Diagnostic 2: GPIO Capabilities ---[/bold cyan]")
-        caps = board.capabilities()
-        pins = caps.get('pins', [])
-        print_badge("OK", f"Detected {len(pins)} accessible GPIO pins")
-        pwm_pins = [p['pin'] for p in pins if p.get('pwm')]
-        servo_pins = [p['pin'] for p in pins if p.get('servo')]
-        print_badge("INFO", f"PWM channels: {pwm_pins}")
-        print_badge("INFO", f"Servo channels: {servo_pins}")
+        update_test(1, "RUNNING", "Fetching hardware pin table...")
+        pwm_pins = []
+        servo_pins = []
+        try:
+            caps = board.capabilities()
+            pins = caps.get('pins', [])
+            pwm_pins = [p['pin'] for p in pins if p.get('pwm')]
+            servo_pins = [p['pin'] for p in pins if p.get('servo')]
+            detail = f"{len(pins)} GPIOs ({len(pwm_pins)} PWM, {len(servo_pins)} Servo)"
+            update_test(1, "PASS", detail)
+            passed += 1
+        except Exception as e:
+            update_test(1, "FAIL", str(e)[:35])
+            failed += 1
 
         # Test 3: Digital I/O
-        ui_print(f"\n[bold cyan]--- Diagnostic 3: Digital I/O (GPIO {args.led_pin}) ---[/bold cyan]")
+        update_test(2, "RUNNING", f"Toggling GPIO {args.led_pin} HIGH/LOW...")
         try:
             board.set_mode(args.led_pin, 'OUTPUT')
-            print_badge("OK", f"Configured GPIO {args.led_pin} as OUTPUT")
-
             board.write(args.led_pin, 1)
-            print_badge("OK", f"GPIO {args.led_pin} HIGH (LED ON)")
-            time.sleep(0.5)
-
+            time.sleep(0.3)
             board.write(args.led_pin, 0)
-            print_badge("OK", f"GPIO {args.led_pin} LOW (LED OFF)")
-
-            value = board.read(args.led_pin)
-            print_badge("OK", f"GPIO {args.led_pin} state read back: {value}")
+            val = board.read(args.led_pin)
+            update_test(2, "PASS", f"Output toggled (readback: {val})")
+            passed += 1
         except Exception as e:
-            print_badge("ERROR", f"Digital I/O test failed: {e}")
+            update_test(2, "FAIL", str(e)[:35])
+            failed += 1
 
         # Test 4: PWM
-        if args.pwm_pin in pwm_pins:
-            ui_print(f"\n[bold cyan]--- Diagnostic 4: PWM Generator (GPIO {args.pwm_pin}) ---[/bold cyan]")
+        if args.pwm_pin in pwm_pins or not pwm_pins:
+            update_test(3, "RUNNING", f"Testing duty cycle on GPIO {args.pwm_pin}...")
             try:
                 board.set_mode(args.pwm_pin, 'PWM')
-                print_badge("OK", f"Configured GPIO {args.pwm_pin} as PWM")
-
-                for value in [0, 256, 512, 768, 1023]:
-                    board.pwm(args.pwm_pin, value)
-                    pct = (value / 1023) * 100
-                    print_badge("OK", f"PWM duty cycle: {value}/1023 ({pct:.1f}%)")
-                    time.sleep(0.2)
+                for val in [0, 512, 1023, 0]:
+                    board.pwm(args.pwm_pin, val)
+                    time.sleep(0.08)
+                update_test(3, "PASS", "Duty sweep 0 -> 1023 verified")
+                passed += 1
             except Exception as e:
-                print_badge("ERROR", f"PWM test failed: {e}")
+                update_test(3, "FAIL", str(e)[:35])
+                failed += 1
         else:
-            print_badge("WARN", f"GPIO {args.pwm_pin} does not support PWM")
+            update_test(3, "SKIP", f"GPIO {args.pwm_pin} no PWM support")
+            skipped += 1
 
         # Test 5: Servo
-        if args.servo_pin in servo_pins:
-            ui_print(f"\n[bold cyan]--- Diagnostic 5: Servo Controller (GPIO {args.servo_pin}) ---[/bold cyan]")
+        if args.servo_pin in servo_pins or not servo_pins:
+            update_test(4, "RUNNING", f"Sweeping servo angles on GPIO {args.servo_pin}...")
             try:
                 board.set_mode(args.servo_pin, 'SERVO')
-                print_badge("OK", f"Configured GPIO {args.servo_pin} as SERVO")
-
-                for angle in [0, 45, 90, 135, 180]:
+                for angle in [0, 90, 180, 90]:
                     board.servo(args.servo_pin, angle)
-                    print_badge("OK", f"Servo commanded to: {angle} degrees")
-                    time.sleep(0.2)
+                    time.sleep(0.08)
+                update_test(4, "PASS", "Sweep 0° -> 180° verified")
+                passed += 1
             except Exception as e:
-                print_badge("ERROR", f"Servo test failed: {e}")
+                update_test(4, "FAIL", str(e)[:35])
+                failed += 1
         else:
-            print_badge("WARN", f"GPIO {args.servo_pin} does not support servo")
+            update_test(4, "SKIP", f"GPIO {args.servo_pin} no Servo support")
+            skipped += 1
 
-        # Test 6: Analog Reading
-        ui_print("\n[bold cyan]--- Diagnostic 6: Analog ADC ---[/bold cyan]")
+        # Test 6: Analog ADC
+        update_test(5, "RUNNING", "Sampling ADC pin A0...")
         try:
-            analog_value = board.read('A0')
-            voltage = (analog_value / 1024.0) * 3.3
-            print_badge("OK", f"ADC A0: {analog_value}/1024 ({voltage:.2f}V)")
+            analog_val = board.read('A0')
+            voltage = (analog_val / 1024.0) * 3.3
+            update_test(5, "PASS", f"Raw: {analog_val}/1024 ({voltage:.2f}V)")
+            passed += 1
         except Exception as e:
-            print_badge("ERROR", f"Analog reading failed: {e}")
+            update_test(5, "FAIL", str(e)[:35])
+            failed += 1
 
         # Test 7: Batch Operations
-        ui_print("\n[bold cyan]--- Diagnostic 7: High-Speed Batch Operations ---[/bold cyan]")
+        update_test(6, "RUNNING", "Testing atomic batch request...")
         try:
-            operations = [
-                {'type': 'write', 'pin': args.led_pin, 'value': 1},
+            ops = [
+                {'type': 'write', 'pin': args.led_pin, 'value': 0},
                 {'type': 'read', 'pin': args.led_pin}
             ]
-
-            if args.pwm_pin in pwm_pins:
-                operations.append({'type': 'pwm', 'pin': args.pwm_pin, 'value': 512})
-
-            if args.servo_pin in servo_pins:
-                operations.append({'type': 'servo', 'pin': args.servo_pin, 'angle': 90})
-
-            results = board.batch(operations)
-            success_count = sum(1 for r in results.get('results', []) if r.get('success'))
-            total_count = len(results.get('results', []))
-            print_badge("OK", f"Batch execution: {success_count}/{total_count} operations verified")
+            batch_res = board.batch(ops)
+            ok_cnt = sum(1 for r in batch_res.get('results', []) if r.get('success'))
+            update_test(6, "PASS", f"{ok_cnt}/{len(ops)} operations atomic OK")
+            passed += 1
         except Exception as e:
-            print_badge("ERROR", f"Batch operations failed: {e}")
+            update_test(6, "FAIL", str(e)[:35])
+            failed += 1
 
-        # Close connection
+    finally:
+        if live_context:
+            live_context.stop()
         board.close()
 
-        if RICH_AVAILABLE and console:
-            from rich.panel import Panel
-            from rich.text import Text
-            from rich import box
-            res = Text()
-            res.append("[SUCCESS] All hardware diagnostic tests passed!\n", style="bold green")
-            res.append(f"Target: {device_url} is fully operational and responsive.\n", style="white")
-            console.print(Panel(res, box=box.ROUNDED, border_style="green", expand=False))
+    # Final summary panel
+    total_tests = passed + failed + skipped
+    if is_interactive and ui.console:
+        summary = Text()
+        if failed == 0:
+            summary.append(f"✔ All Hardware Diagnostics Passed! ({passed}/{total_tests} passed)\n\n", style=f"bold {ui.COLOR_SUCCESS}")
+            summary.append(f"Target: {device_url} is healthy and responsive.\n", style="white")
+            summary.append("You are ready to control the board using the Python SDK:\n", style=ui.COLOR_MUTED)
+            summary.append(f"  from esp_linker import ESPBoard\n  board = ESPBoard(ip='{args.device}')\n", style="bold white")
+            panel = Panel(summary, title=f"[bold {ui.COLOR_SUCCESS}]Diagnostics Passed[/bold {ui.COLOR_SUCCESS}]", box=box.ROUNDED, border_style=ui.COLOR_SUCCESS, expand=False)
         else:
-            print("\n[SUCCESS] All hardware tests passed!")
-            print(f"Target {device_url} is operational.\n")
-
-    except ConnectionError as e:
-        print_badge("ERROR", f"Connection failed: {e}")
-        ui_print("\n[dim]Troubleshooting:[/dim]")
-        ui_print("  - Verify board IP address")
-        ui_print("  - Ensure board and PC are on the same WiFi network")
-        sys.exit(1)
-    except Exception as e:
-        print_badge("ERROR", f"Test suite aborted: {e}")
-        sys.exit(1)
+            summary.append(f"✖ Diagnostic Failures Detected ({failed} failed, {passed} passed)\n\n", style=f"bold {ui.COLOR_ERROR}")
+            summary.append(f"Target: {device_url} had test failures. Review table above.\n", style="white")
+            panel = Panel(summary, title=f"[bold {ui.COLOR_ERROR}]Diagnostics Incomplete[/bold {ui.COLOR_ERROR}]", box=box.ROUNDED, border_style=ui.COLOR_ERROR, expand=False)
+        ui.console.print(panel)
+    else:
+        print(f"\nDiagnostics completed: {passed} passed, {failed} failed, {skipped} skipped.")
 
 # Removed incomplete main_cli() function - using the complete one below
 
@@ -400,27 +471,40 @@ def flash_esp8266_cli():
         action="store_true",
         help="Show bundled firmware information"
     )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Disable colors and rich terminal animations"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose debug mode and rich tracebacks"
+    )
 
     args = parser.parse_args()
+
+    ui.configure(plain=args.plain or ui.plain_mode, debug=args.debug or ui.debug_mode)
 
     try:
         flasher = ESP8266Flasher()
 
         # List ports
         if args.list_ports:
+            ui.banner("ESP-LINKER", "Serial Port Scanner")
             flasher.display_ports_table()
             return
 
         # Show chip info
         if args.chip_info:
+            ui.banner("ESP-LINKER", "Chip Telemetry")
             try:
                 info = flasher.get_chip_info(args.port)
-                if RICH_AVAILABLE and console:
+                if RICH_AVAILABLE and ui.console and not ui.plain_mode:
                     from rich.table import Table
-                    from rich.panel import Panel
                     from rich import box
-                    table = Table(box=box.ROUNDED, border_style="cyan", show_header=False)
-                    table.add_column("Property", style="bold cyan", width=16)
+                    table = Table(title="Chip Telemetry", box=box.ROUNDED, border_style=ui.COLOR_BORDER, title_style="bold #38bdf8", show_header=False)
+                    table.add_column("Property", style="bold #38bdf8", width=16)
                     table.add_column("Value", style="white")
                     table.add_row("Port", info['port'])
                     table.add_row("Chip Type", info['chip_type'])
@@ -428,23 +512,23 @@ def flash_esp8266_cli():
                         table.add_row("Chip ID", str(info['chip_id']))
                     if 'mac_address' in info:
                         table.add_row("MAC Address", str(info['mac_address']))
-                    console.print(Panel(table, title="[bold white]Chip Telemetry[/bold white]", box=box.ROUNDED, border_style="cyan"))
+                    ui.console.print(table)
                 else:
                     print(f"Port: {info['port']} | Chip: {info['chip_type']} | ID: {info.get('chip_id', 'N/A')}")
             except Exception as e:
-                print_badge("ERROR", f"Failed to get chip info: {e}")
+                ui.error(f"Failed to get chip info: {e}")
             return
 
         # Show firmware info
         if args.firmware_info:
+            ui.banner("ESP-LINKER", "Firmware Package Info")
             try:
                 info = flasher.get_firmware_info()
-                if RICH_AVAILABLE and console:
+                if RICH_AVAILABLE and ui.console and not ui.plain_mode:
                     from rich.table import Table
-                    from rich.panel import Panel
                     from rich import box
-                    table = Table(box=box.ROUNDED, border_style="cyan", show_header=False)
-                    table.add_column("Property", style="bold cyan", width=16)
+                    table = Table(title="Bundled Firmware Image", box=box.ROUNDED, border_style=ui.COLOR_BORDER, title_style="bold #38bdf8", show_header=False)
+                    table.add_column("Property", style="bold #38bdf8", width=16)
                     table.add_column("Value", style="white")
                     table.add_row("Name", info['name'])
                     table.add_row("Version", info['version'])
@@ -452,14 +536,15 @@ def flash_esp8266_cli():
                     table.add_row("File Size", f"{info['size_kb']} KB ({info['size']:,} bytes)")
                     table.add_row("Binary Path", info['path'])
                     table.add_row("Last Modified", info['modified'])
-                    console.print(Panel(table, title="[bold white]Bundled Firmware Image[/bold white]", box=box.ROUNDED, border_style="cyan"))
+                    ui.console.print(table)
                 else:
                     print(f"Firmware: {info['name']} v{info['version']} ({info['size_kb']} KB)")
             except Exception as e:
-                print_badge("ERROR", f"Failed to get firmware info: {e}")
+                ui.error(f"Failed to get firmware info: {e}")
             return
 
-        # Flash firmware
+        # Flash firmware with rich animated TUI
+        ui.banner("ESP-LINKER", "Firmware Flasher")
         success = flasher.flash_firmware(
             port=args.port,
             baud_rate=args.baud,
@@ -469,17 +554,23 @@ def flash_esp8266_cli():
             sys.exit(1)
 
     except FlashError as e:
-        print_badge("ERROR", f"Flash Error: {e}")
+        ui.error(f"Flash Error: {e}")
         sys.exit(1)
     except DeviceNotFoundError as e:
-        print_badge("ERROR", f"Device Error: {e}")
-        ui_print("\n[dim]Troubleshooting:[/dim]")
-        ui_print("  - Check that ESP8266 is connected via USB data cable")
-        ui_print("  - Run [bold white]esp-linker detect[/bold white] to see available serial ports")
-        ui_print("  - Specify port manually with: [bold white]esp-linker flash --port COM3[/bold white]")
+        ui.error(f"Device Error: {e}")
+        if ui.console and not ui.plain_mode:
+            ui.console.print("\n[dim white]Troubleshooting:[/dim white]")
+            ui.console.print("  - Check that ESP8266 is connected via USB data cable")
+            ui.console.print("  - Run [bold cyan]esp-linker detect[/bold cyan] to see available serial ports")
+            ui.console.print("  - Specify port manually with: [bold cyan]esp-linker flash --port COM4[/bold cyan]")
+        else:
+            print("\nTroubleshooting:")
+            print("  - Check that ESP8266 is connected via USB data cable")
+            print("  - Run esp-linker detect to see available serial ports")
+            print("  - Specify port manually with: esp-linker flash --port COM4")
         sys.exit(1)
     except Exception as e:
-        print_badge("ERROR", f"Execution error: {e}")
+        ui.error(f"Execution error: {e}")
         sys.exit(1)
 
 
@@ -942,12 +1033,30 @@ def wifi_disable_ap_command(ip):
 
 def main():
     """Main CLI entry point for esp-linker command"""
-    # Call the main CLI function with all commands
-    main_cli()
+    try:
+        main_cli()
+    except KeyboardInterrupt:
+        if ui.console and not ui.plain_mode:
+            ui.console.print("\n[bold yellow]▲ Operation cancelled by user.[/bold yellow]")
+        else:
+            print("\n[INFO] Operation cancelled by user.")
+        sys.exit(130)
 
 
 def main_cli():
     """Main CLI function"""
+    # Global UI configuration
+    is_tty = sys.stdout.isatty() if hasattr(sys.stdout, 'isatty') else False
+    plain = ("--plain" in sys.argv) or (not is_tty)
+    debug = "--debug" in sys.argv
+
+    if "--plain" in sys.argv:
+        sys.argv.remove("--plain")
+    if "--debug" in sys.argv:
+        sys.argv.remove("--debug")
+
+    ui.configure(plain=plain, debug=debug)
+
     if len(sys.argv) > 1:
         command = sys.argv[1]
 

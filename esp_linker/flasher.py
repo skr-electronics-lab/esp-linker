@@ -314,15 +314,15 @@ class ESP8266Flasher:
             print("-" * 50)
 
     def _execute_flash(self, port: str, baud_rate: int, erase_flash: bool,
-                       progress: ProgressTracker, progress_callback: Optional[Callable] = None) -> bool:
-        """Execute esptool flash with real-time output parsing to prevent deadlock"""
+                       callbacks: Optional[Any] = None,
+                       progress_callback: Optional[Callable] = None) -> bool:
+        """Execute esptool flash with unbuffered real-time output streaming"""
         cmd = [
-            sys.executable, "-m", "esptool",
+            sys.executable, "-u", "-m", "esptool",
             "--chip", "esp8266",
             "--port", port,
             "--baud", str(baud_rate),
-            "--before", "default-reset",
-            "--after", "hard-reset",
+            "--connect-attempts", "10",
             "write-flash",
             "--flash-size", "detect",
             "--flash-mode", self.DEFAULT_FLASH_MODE,
@@ -334,52 +334,113 @@ class ESP8266Flasher:
 
         cmd.extend([self.FLASH_ADDRESS, self.firmware_path])
 
-        progress.start_operation(f"Connecting ({baud_rate} baud) & Writing Flash", total=100)
+        firmware_size = os.path.getsize(self.firmware_path) if os.path.exists(self.firmware_path) else 0
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
 
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1
+            bufsize=0,
+            env=env
         )
 
         all_output = []
-        percent_pattern = re.compile(r'\((\d+)\s*%\)')
+        r_bytes = re.compile(r'(\d+)\s*/\s*(\d+)\s+bytes')
+        r_pct = re.compile(r'\(?(\d+(?:\.\d+)?)\s*%')
+        ansi_strip = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+        erasing = False
+        flashing_started = False
+
+        def _stream_lines(raw_stream):
+            buf = bytearray()
+            while True:
+                char = raw_stream.read(1)
+                if not char:
+                    if buf:
+                        yield buf.decode('utf-8', errors='replace').strip()
+                    break
+                if char in (b'\r', b'\n'):
+                    if buf:
+                        line = buf.decode('utf-8', errors='replace').strip()
+                        buf.clear()
+                        if line:
+                            yield line
+                else:
+                    buf.extend(char)
 
         try:
-            for line in iter(process.stdout.readline, ''):
-                all_output.append(line)
-                clean_line = line.strip()
+            for raw_line in _stream_lines(process.stdout):
+                all_output.append(raw_line + "\n")
+                clean_line = ansi_strip.sub('', raw_line).strip()
 
                 if progress_callback:
                     progress_callback(clean_line)
 
-                match = percent_pattern.search(clean_line)
-                if match:
-                    pct = int(match.group(1))
-                    progress.update_to(pct, f"Writing blocks: {pct}%")
+                if "Connecting" in clean_line:
+                    if callbacks and hasattr(callbacks, "on_sync"):
+                        callbacks.on_sync()
                 elif "Erasing flash" in clean_line:
-                    progress.update_to(10, "Erasing flash sectors...")
-                elif "Connecting" in clean_line:
-                    progress.update_to(5, "Syncing with bootloader...")
+                    erasing = True
+                    if callbacks and hasattr(callbacks, "on_erase_start"):
+                        callbacks.on_erase_start()
+                elif "Flash memory erased successfully" in clean_line:
+                    if erasing:
+                        erasing = False
+                        if callbacks and hasattr(callbacks, "on_erase_complete"):
+                            callbacks.on_erase_complete()
+                elif "Writing at 0x" in clean_line or r_pct.search(clean_line) or r_bytes.search(clean_line):
+                    if erasing:
+                        erasing = False
+                        if callbacks and hasattr(callbacks, "on_erase_complete"):
+                            callbacks.on_erase_complete()
+                    if not flashing_started:
+                        flashing_started = True
+                        if callbacks and hasattr(callbacks, "on_flash_start"):
+                            callbacks.on_flash_start(firmware_size)
+                    bytes_match = r_bytes.search(clean_line)
+                    pct_match = r_pct.search(clean_line)
+                    if bytes_match:
+                        bytes_written = int(bytes_match.group(1))
+                        total_bytes = int(bytes_match.group(2))
+                        if callbacks and hasattr(callbacks, "on_flash_progress"):
+                            callbacks.on_flash_progress(bytes_written, total_bytes)
+                    elif pct_match:
+                        pct = float(pct_match.group(1))
+                        bytes_written = int(firmware_size * (pct / 100.0))
+                        if callbacks and hasattr(callbacks, "on_flash_progress"):
+                            callbacks.on_flash_progress(bytes_written, firmware_size)
                 elif "Hash of data verified" in clean_line:
-                    progress.update_to(100, "Verifying flash image...")
+                    if callbacks and hasattr(callbacks, "on_flash_complete"):
+                        callbacks.on_flash_complete()
+                elif "Leaving... Hard resetting" in clean_line or "Hard resetting" in clean_line:
+                    if callbacks and hasattr(callbacks, "on_reset_start"):
+                        callbacks.on_reset_start()
 
             process.stdout.close()
             process.wait()
         except Exception:
             process.kill()
+            if callbacks and hasattr(callbacks, "finish"):
+                callbacks.finish()
             raise
 
         full_log = "".join(all_output)
 
         if process.returncode != 0:
+            if callbacks and hasattr(callbacks, "finish"):
+                callbacks.finish()
             if "Timed out waiting for packet header" in full_log or "Failed to connect" in full_log:
                 raise TimeoutError(f"Connection timed out at {baud_rate} baud.\n{full_log}")
             raise FlashError(f"Flashing failed with exit code {process.returncode}:\n{full_log}")
 
-        progress.finish_operation("Firmware successfully written and verified!")
+        if callbacks and hasattr(callbacks, "on_reset_complete"):
+            callbacks.on_reset_complete()
+        if callbacks and hasattr(callbacks, "finish"):
+            callbacks.finish()
+
         return True
 
     def flash_firmware(self,
@@ -387,36 +448,69 @@ class ESP8266Flasher:
                        baud_rate: int = DEFAULT_BAUD_RATE,
                        erase_flash: bool = True,
                        verify: bool = True,
+                       callbacks: Optional[Any] = None,
                        progress_callback: Optional[Callable] = None,
                        use_progress_bar: bool = True) -> bool:
         """
         Flash ESP-Linker firmware to ESP8266 with automatic baud fallback and deadlock prevention.
         """
-        render_banner()
+        from .ui import ui, RichFlashProgressCallback
 
         # Port detection
         if port is None:
-            print_badge("DETECT", "Auto-detecting connected ESP8266 board...")
-            port = self.auto_detect_port()
-            print_badge("OK", f"Detected board on serial port: [bold cyan]{port}[/bold cyan]")
+            ports = self.detect_esp8266_ports()
+            if not ports:
+                raise DeviceNotFoundError("No USB serial ports detected. Connect your ESP8266 board via USB.")
+            if len(ports) == 1:
+                port = ports[0]['port']
+                ui.success(f"Detected board on serial port: [bold cyan]{port}[/bold cyan] ({ports[0]['description']})")
+            else:
+                choices = [
+                    {
+                        "title": f"{p['port']}  -  {p['description']}" + (" [Likely ESP8266]" if p['likely_esp'] else ""),
+                        "value": p['port']
+                    }
+                    for p in ports
+                ]
+                port = ui.select_menu("Select serial port for ESP8266:", choices, default=ports[0]['port'])
+                ui.success(f"Selected serial port: [bold cyan]{port}[/bold cyan]")
         else:
-            print_badge("INFO", f"Using specified serial port: [bold cyan]{port}[/bold cyan]")
+            ui.info(f"Using specified serial port: [bold cyan]{port}[/bold cyan]")
 
         if not os.path.exists(self.firmware_path):
             raise FlashError(f"Firmware binary missing: {self.firmware_path}")
 
-        self.display_flash_summary(port, baud_rate)
+        fw_info = self.get_firmware_info()
+        ui.show_firmware_panel(fw_info, port, baud_rate)
 
-        progress = ProgressTracker(use_progress_bar)
+        if callbacks is None and use_progress_bar:
+            callbacks = RichFlashProgressCallback(ui)
+
+        if callbacks and hasattr(callbacks, "on_start"):
+            callbacks.on_start(port, baud_rate, fw_info)
 
         try:
-            success = self._execute_flash(port, baud_rate, erase_flash, progress, progress_callback)
+            success = self._execute_flash(port, baud_rate, erase_flash, callbacks, progress_callback)
         except TimeoutError as e:
             if baud_rate != self.FALLBACK_BAUD_RATE:
-                print_badge("WARN", f"High-speed baud rate ({baud_rate}) timed out.")
-                print_badge("RETRY", f"Retrying at safe baud rate ({self.FALLBACK_BAUD_RATE} bps)...")
+                ui.warn(f"High-speed baud rate ({baud_rate}) timed out.")
+                ui.warn(f"Resetting board and retrying at safe baud rate ({self.FALLBACK_BAUD_RATE} bps)...")
+                try:
+                    import serial
+                    s = serial.Serial(port, 115200)
+                    s.setDTR(False)
+                    s.setRTS(True)
+                    time.sleep(0.15)
+                    s.setDTR(True)
+                    s.setRTS(False)
+                    time.sleep(0.3)
+                    s.close()
+                except Exception:
+                    pass
                 time.sleep(1.0)
-                success = self._execute_flash(port, self.FALLBACK_BAUD_RATE, erase_flash, progress, progress_callback)
+                if callbacks and hasattr(callbacks, "on_start"):
+                    callbacks.on_start(port, self.FALLBACK_BAUD_RATE, fw_info)
+                success = self._execute_flash(port, self.FALLBACK_BAUD_RATE, erase_flash, callbacks, progress_callback)
             else:
                 raise FlashError(str(e))
         except FlashError:
@@ -426,23 +520,7 @@ class ESP8266Flasher:
 
         # Post-flash clean summary
         if success:
-            if RICH_AVAILABLE and console:
-                panel_text = Text()
-                panel_text.append("[SUCCESS] ESP-Linker firmware installed successfully!\n\n", style="bold green")
-                panel_text.append("Next Steps:\n", style="bold white")
-                panel_text.append(" 1. Run WiFi Wizard:   ", style="cyan")
-                panel_text.append("esp-linker setup-wifi\n", style="bold white")
-                panel_text.append(" 2. Discover Devices: ", style="cyan")
-                panel_text.append("esp-linker discover\n", style="bold white")
-                panel_text.append(" 3. Start Python:     ", style="cyan")
-                panel_text.append("from esp_linker import connect_auto\n", style="bold white")
-                panel = Panel(panel_text, box=box.ROUNDED, border_style="green", expand=False)
-                console.print(panel)
-            else:
-                print("\n[SUCCESS] Firmware installed successfully!")
-                print("Next Steps:")
-                print("  1. esp-linker setup-wifi")
-                print("  2. esp-linker discover")
+            ui.show_flash_success(port)
 
         return success
 

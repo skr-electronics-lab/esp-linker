@@ -9,9 +9,10 @@ urllib3>=1.26.0
 esptool>=4.5.0
 pyserial>=3.5
 
-# UI enhancements
+# Modern TUI engine and interactive menus
 rich>=12.0.0
-tqdm>=4.65.0
+questionary>=2.0.0
+pyfiglet>=0.8.0
 
 # Device discovery
 zeroconf>=0.38.0

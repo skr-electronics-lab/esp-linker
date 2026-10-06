@@ -5,6 +5,26 @@ All notable changes to ESP-Linker will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.8] - 2026-10-07
+
+### Added
+- **Modern Animated TUI Engine**: Built with Rich, Questionary arrow-key interactive menus, and compact box geometry. Features real-time progress bars, transfer speeds, ETA counters, geometric box styling, and zero emojis.
+- **Live In-Place Diagnostic Dashboard**: Upgraded `esp-linker test <IP>` to an in-place updating dashboard with `rich.live.Live` verifying telemetry, pin tables, digital I/O, PWM sweeps, servo positioning, ADC readings, and batch pipelines.
+- **Flashing Progress Architecture**: Decoupled UI and core flasher logic using progress callbacks (`on_sync`, `on_erase_start`, `on_flash_progress`, `on_reset_start`).
+- **Interactive Port & Network Selection**: Uses Questionary for clean arrow-key menu selection across detected serial ports and scanned WiFi networks.
+- **Pre-Flash & Post-Flash Panels**: Hardware telemetry review panel before flashing and clean numbered next steps guide after verification.
+- **Global CLI Flags**: Added `--plain` (auto-enabled when piped or not a TTY) and `--debug` with rich tracebacks.
+- **Cross-Platform UTF-8 Support**: Automatic Windows console stdout reconfiguration to prevent legacy `cp1252` encoding exceptions.
+- **SKR Ko-fi Support Badge**: Direct community sponsorship button and links for SKR Electronics Lab.
+- **Comprehensive API Tutorials**: Line-by-line documented code examples for every feature in `README.md`.
+
+### Fixed
+- **Real-Time Flashing Progress**: Added support for `esptool v5.x` byte counters (`bytes_sent/total_bytes`) and unparenthesized percentages, completely eliminating the 0% to 100% jump during flashing.
+- **Active Serial WiFi Scanning**: Fixed premature silence timeouts during `WiFi.scanNetworks()` in `setup-wifi`, ensuring all available 2.4 GHz networks are reliably discovered.
+- **WiFi Wizard Credential Confirmation**: Fixed response buffer reading to reliably capture assigned IP address and signal strength after connecting.
+- **Subprocess Deadlock Prevention**: Replaced pipe buffering with unbuffered binary stream decoding on both `\r` and `\n`.
+- **Firmware Path Resolution**: Fully removed deprecated `pkg_resources` API in favor of modern `pathlib.Path`.
+
 ## [1.3.7] - 2025-07-15
 
 ### Fixed
