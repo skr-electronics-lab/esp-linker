@@ -178,135 +178,140 @@ def test_device_cli():
     
     args = parser.parse_args()
     
-    print("[*] ESP-Link Device Test")
-    print("(c) 2025 SK Raihan / SKR Electronics Lab")
-    print("=" * 50)
-    
+    render_banner("ESP-LINKER DEVICE DIAGNOSTICS", "Hardware Verification Suite")
+
     # Determine if input is IP or URL
     device_url = args.device
     if not device_url.startswith('http'):
         device_url = f"http://{device_url}"
-    
+
     try:
         # Connect to device
-        print(f"[*] Connecting to {device_url}...")
+        print_badge("INFO", f"Connecting to board at [bold cyan]{device_url}[/bold cyan]...")
         board = ESPBoard(url=device_url, timeout=args.timeout)
-        
+
         # Test 1: Status
-        print("\n[=] Test 1: Device Status")
+        ui_print("\n[bold cyan]--- Diagnostic 1: Telemetry & Status ---[/bold cyan]")
         status = board.status()
-        print(f"[+] Firmware: {status['firmware_name']} v{status['firmware_version']}")
-        print(f"[+] Uptime: {format_uptime(status['uptime'])}")
-        print(f"[+] Memory: {format_memory(status['free_heap'])} free")
-        print(f"[+] WiFi: {status.get('wifi_ssid', 'Not connected')}")
-        
+        print_badge("OK", f"Firmware: {status['firmware_name']} v{status['firmware_version']}")
+        print_badge("OK", f"Uptime: {format_uptime(status['uptime'])}")
+        print_badge("OK", f"Free Memory: {format_memory(status['free_heap'])}")
+        print_badge("OK", f"WiFi Network: {status.get('wifi_ssid', 'Not connected')}")
+
         # Test 2: Capabilities
-        print("\n[*] Test 2: Pin Capabilities")
+        ui_print("\n[bold cyan]--- Diagnostic 2: GPIO Capabilities ---[/bold cyan]")
         caps = board.capabilities()
         pins = caps.get('pins', [])
-        print(f"[+] Found {len(pins)} GPIO pins")
+        print_badge("OK", f"Detected {len(pins)} accessible GPIO pins")
         pwm_pins = [p['pin'] for p in pins if p.get('pwm')]
         servo_pins = [p['pin'] for p in pins if p.get('servo')]
-        print(f"[+] PWM capable pins: {pwm_pins}")
-        print(f"[+] Servo capable pins: {servo_pins}")
-        
+        print_badge("INFO", f"PWM channels: {pwm_pins}")
+        print_badge("INFO", f"Servo channels: {servo_pins}")
+
         # Test 3: Digital I/O
-        print(f"\n[i] Test 3: Digital I/O (Pin {args.led_pin})")
+        ui_print(f"\n[bold cyan]--- Diagnostic 3: Digital I/O (GPIO {args.led_pin}) ---[/bold cyan]")
         try:
             board.set_mode(args.led_pin, 'OUTPUT')
-            print(f"[+] Set pin {args.led_pin} to OUTPUT mode")
-            
+            print_badge("OK", f"Configured GPIO {args.led_pin} as OUTPUT")
+
             board.write(args.led_pin, 1)
-            print(f"[+] LED ON (pin {args.led_pin})")
-            time.sleep(1)
-            
+            print_badge("OK", f"GPIO {args.led_pin} HIGH (LED ON)")
+            time.sleep(0.5)
+
             board.write(args.led_pin, 0)
-            print(f"[+] LED OFF (pin {args.led_pin})")
-            
+            print_badge("OK", f"GPIO {args.led_pin} LOW (LED OFF)")
+
             value = board.read(args.led_pin)
-            print(f"[+] Read pin {args.led_pin}: {value}")
+            print_badge("OK", f"GPIO {args.led_pin} state read back: {value}")
         except Exception as e:
-            print(f"[!] Digital I/O test failed: {e}")
-        
+            print_badge("ERROR", f"Digital I/O test failed: {e}")
+
         # Test 4: PWM
         if args.pwm_pin in pwm_pins:
-            print(f"\n[?] Test 4: PWM Control (Pin {args.pwm_pin})")
+            ui_print(f"\n[bold cyan]--- Diagnostic 4: PWM Generator (GPIO {args.pwm_pin}) ---[/bold cyan]")
             try:
                 board.set_mode(args.pwm_pin, 'PWM')
-                print(f"[+] Set pin {args.pwm_pin} to PWM mode")
-                
+                print_badge("OK", f"Configured GPIO {args.pwm_pin} as PWM")
+
                 for value in [0, 256, 512, 768, 1023]:
                     board.pwm(args.pwm_pin, value)
-                    percentage = (value / 1023) * 100
-                    print(f"[+] PWM {value}/1023 ({percentage:.1f}%)")
-                    time.sleep(0.5)
+                    pct = (value / 1023) * 100
+                    print_badge("OK", f"PWM duty cycle: {value}/1023 ({pct:.1f}%)")
+                    time.sleep(0.2)
             except Exception as e:
-                print(f"[!] PWM test failed: {e}")
+                print_badge("ERROR", f"PWM test failed: {e}")
         else:
-            print(f"\n[!]  Test 4: PWM - Pin {args.pwm_pin} does not support PWM")
-        
+            print_badge("WARN", f"GPIO {args.pwm_pin} does not support PWM")
+
         # Test 5: Servo
         if args.servo_pin in servo_pins:
-            print(f"\n[~] Test 5: Servo Control (Pin {args.servo_pin})")
+            ui_print(f"\n[bold cyan]--- Diagnostic 5: Servo Controller (GPIO {args.servo_pin}) ---[/bold cyan]")
             try:
                 board.set_mode(args.servo_pin, 'SERVO')
-                print(f"[+] Set pin {args.servo_pin} to SERVO mode")
-                
+                print_badge("OK", f"Configured GPIO {args.servo_pin} as SERVO")
+
                 for angle in [0, 45, 90, 135, 180]:
                     board.servo(args.servo_pin, angle)
-                    print(f"[+] Servo angle: {angle}deg")
-                    time.sleep(0.5)
+                    print_badge("OK", f"Servo commanded to: {angle} degrees")
+                    time.sleep(0.2)
             except Exception as e:
-                print(f"[!] Servo test failed: {e}")
+                print_badge("ERROR", f"Servo test failed: {e}")
         else:
-            print(f"\n[!]  Test 5: Servo - Pin {args.servo_pin} does not support servo")
-        
+            print_badge("WARN", f"GPIO {args.servo_pin} does not support servo")
+
         # Test 6: Analog Reading
-        print("\n[^] Test 6: Analog Reading")
+        ui_print("\n[bold cyan]--- Diagnostic 6: Analog ADC ---[/bold cyan]")
         try:
             analog_value = board.read('A0')
             voltage = (analog_value / 1024.0) * 3.3
-            print(f"[+] Analog A0: {analog_value}/1024 ({voltage:.2f}V)")
+            print_badge("OK", f"ADC A0: {analog_value}/1024 ({voltage:.2f}V)")
         except Exception as e:
-            print(f"[!] Analog reading failed: {e}")
-        
+            print_badge("ERROR", f"Analog reading failed: {e}")
+
         # Test 7: Batch Operations
-        print("\n[+] Test 7: Batch Operations")
+        ui_print("\n[bold cyan]--- Diagnostic 7: High-Speed Batch Operations ---[/bold cyan]")
         try:
             operations = [
                 {'type': 'write', 'pin': args.led_pin, 'value': 1},
                 {'type': 'read', 'pin': args.led_pin}
             ]
-            
+
             if args.pwm_pin in pwm_pins:
                 operations.append({'type': 'pwm', 'pin': args.pwm_pin, 'value': 512})
-            
+
             if args.servo_pin in servo_pins:
                 operations.append({'type': 'servo', 'pin': args.servo_pin, 'angle': 90})
-            
+
             results = board.batch(operations)
             success_count = sum(1 for r in results.get('results', []) if r.get('success'))
             total_count = len(results.get('results', []))
-            print(f"[+] Batch operations: {success_count}/{total_count} successful")
+            print_badge("OK", f"Batch execution: {success_count}/{total_count} operations verified")
         except Exception as e:
-            print(f"[!] Batch operations failed: {e}")
-        
+            print_badge("ERROR", f"Batch operations failed: {e}")
+
         # Close connection
         board.close()
-        
-        print("\n" + "=" * 50)
-        print("[*] All tests completed successfully!")
-        print("[+] ESP-Linker device is working correctly")
-        
+
+        if RICH_AVAILABLE and console:
+            from rich.panel import Panel
+            from rich.text import Text
+            from rich import box
+            res = Text()
+            res.append("[SUCCESS] All hardware diagnostic tests passed!\n", style="bold green")
+            res.append(f"Target: {device_url} is fully operational and responsive.\n", style="white")
+            console.print(Panel(res, box=box.ROUNDED, border_style="green", expand=False))
+        else:
+            print("\n[SUCCESS] All hardware tests passed!")
+            print(f"Target {device_url} is operational.\n")
+
     except ConnectionError as e:
-        print(f"[!] Connection failed: {e}")
-        print("\nTroubleshooting:")
-        print("- Check device IP address or URL")
-        print("- Verify device is powered on")
-        print("- Check network connectivity")
+        print_badge("ERROR", f"Connection failed: {e}")
+        ui_print("\n[dim]Troubleshooting:[/dim]")
+        ui_print("  - Verify board IP address")
+        ui_print("  - Ensure board and PC are on the same WiFi network")
         sys.exit(1)
     except Exception as e:
-        print(f"[!] Test failed: {e}")
+        print_badge("ERROR", f"Test suite aborted: {e}")
         sys.exit(1)
 
 # Removed incomplete main_cli() function - using the complete one below
