@@ -272,7 +272,7 @@ class RichFlashProgressCallback:
         self.total_bytes = firmware_info.get('size', 0)
 
     def on_sync(self):
-        self.ui.step("Connecting to ESP8266 bootloader...")
+        self.ui.step("Connecting to ESP bootloader...")
 
     def on_erase_start(self):
         if RICH_AVAILABLE and self.ui.console and not self.ui.plain_mode:

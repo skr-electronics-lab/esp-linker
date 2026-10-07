@@ -307,7 +307,7 @@ class ESP8266Flasher:
         """Display configuration summary table before flashing"""
         chip_name = "ESP32" if "esp32" in (chip or "").lower() else "ESP8266"
         fw_path = self._get_firmware_path(chip)
-        flash_addr = "0x10000" if chip_name == "ESP32" else self.FLASH_ADDRESS
+        flash_addr = self.FLASH_ADDRESS
         firmware_size = os.path.getsize(fw_path)
         firmware_size_kb = firmware_size / 1024
 
@@ -344,7 +344,7 @@ class ESP8266Flasher:
         chip_lower = (chip or "auto").lower()
         if "esp32" in chip_lower:
             target_chip = "esp32"
-            flash_addr = "0x10000"
+            flash_addr = self.FLASH_ADDRESS
             fw_path = self._get_firmware_path("esp32")
         else:
             target_chip = "esp8266"
@@ -623,7 +623,7 @@ class ESP8266Flasher:
         target = chip if chip is not None else getattr(self, "chip", "auto")
         fw_path = self._get_firmware_path(target)
         target_name = "ESP32" if "esp32" in (target or "").lower() else "ESP8266"
-        flash_addr = "0x10000" if target_name == "ESP32" else "0x00000"
+        flash_addr = "0x00000"
 
         if not os.path.exists(fw_path):
             raise FlashError(f"Firmware binary for {target_name} not found: {fw_path}")
