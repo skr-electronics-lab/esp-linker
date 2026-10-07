@@ -496,7 +496,7 @@ def flash_esp8266_cli():
     ui.configure(plain=args.plain or ui.plain_mode, debug=args.debug or ui.debug_mode)
 
     try:
-        flasher = ESPFlasher(chip_type=args.chip)
+        flasher = ESPFlasher(chip=args.chip)
 
         # List ports
         if args.list_ports:
@@ -557,6 +557,7 @@ def flash_esp8266_cli():
         success = flasher.flash_firmware(
             port=args.port,
             baud_rate=args.baud,
+            chip=args.chip,
             erase_flash=not args.no_erase
         )
         if not success:

@@ -5,6 +5,12 @@ All notable changes to ESP-Linker will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-10-07
+
+### Fixed
+- **Flasher Initialization Argument**: Fixed parameter compatibility in `ESP8266Flasher.__init__` and `ESPFlasher` to seamlessly accept `chip`, `chip_type`, and extra keyword arguments without runtime `TypeError`.
+- **CLI Flashing Invocation**: Fixed `esp-linker flash` CLI argument passing for target chip selection.
+
 ## [1.4.0] - 2026-10-07
 
 ### Added

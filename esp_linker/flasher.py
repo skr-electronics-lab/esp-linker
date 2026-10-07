@@ -147,10 +147,11 @@ class ESP8266Flasher:
     DEFAULT_FLASH_FREQ = "40m"
     FLASH_ADDRESS = "0x00000"
 
-    def __init__(self, chip: str = "auto"):
+    def __init__(self, chip: str = "auto", chip_type: Optional[str] = None, **kwargs):
         """Initialize the flasher"""
-        self.chip = chip
-        self.firmware_path = self._get_firmware_path(chip)
+        target_chip = chip_type if chip_type is not None else chip
+        self.chip = target_chip
+        self.firmware_path = self._get_firmware_path(target_chip)
         self.esptool_path = self._get_esptool_path()
 
     def _get_firmware_path(self, chip: str = "auto") -> str:
