@@ -618,10 +618,11 @@ class ESP8266Flasher:
 
         return chip_info
 
-    def get_firmware_info(self, chip: str = "auto") -> Dict[str, Any]:
+    def get_firmware_info(self, chip: Optional[str] = None) -> Dict[str, Any]:
         """Get bundled firmware metadata"""
-        fw_path = self._get_firmware_path(chip)
-        target_name = "ESP32" if "esp32" in (chip or "").lower() else "ESP8266"
+        target = chip if chip is not None else getattr(self, "chip", "auto")
+        fw_path = self._get_firmware_path(target)
+        target_name = "ESP32" if "esp32" in (target or "").lower() else "ESP8266"
         flash_addr = "0x10000" if target_name == "ESP32" else "0x00000"
 
         if not os.path.exists(fw_path):
