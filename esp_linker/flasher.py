@@ -147,30 +147,42 @@ class ESP8266Flasher:
     DEFAULT_FLASH_FREQ = "40m"
     FLASH_ADDRESS = "0x00000"
 
-    def __init__(self):
+    def __init__(self, chip: str = "auto"):
         """Initialize the flasher"""
-        self.firmware_path = self._get_firmware_path()
+        self.chip = chip
+        self.firmware_path = self._get_firmware_path(chip)
         self.esptool_path = self._get_esptool_path()
 
-    def _get_firmware_path(self) -> str:
+    def _get_firmware_path(self, chip: str = "auto") -> str:
         """Get the path to the bundled firmware using modern resource lookup"""
-        # 1. Path relative to module file
         current_dir = Path(__file__).resolve().parent
+        chip_lower = (chip or "auto").lower()
+
+        if "esp32" in chip_lower:
+            firmware_path = current_dir / "firmware" / "esp-linker-esp32.bin"
+            if firmware_path.exists():
+                return str(firmware_path)
+
+        firmware_path = current_dir / "firmware" / "esp-linker-esp8266.bin"
+        if firmware_path.exists():
+            return str(firmware_path)
+
         firmware_path = current_dir / "firmware" / "esp-linker-firmware.bin"
         if firmware_path.exists():
             return str(firmware_path)
 
-        # 2. Try importlib.resources (Python 3.9+)
-        try:
-            import importlib.resources as pkg_res
-            if hasattr(pkg_res, 'files'):
-                traversable = pkg_res.files('esp_linker').joinpath('firmware', 'esp-linker-firmware.bin')
-                if traversable.is_file():
-                    return str(traversable)
-        except Exception:
-            pass
+        raise FlashError(f"ESP-Linker firmware binary for {chip} not found. Please reinstall the library.")
 
-        raise FlashError("ESP-Linker firmware binary not found. Please reinstall the library.")
+    def detect_chip_type(self, port: str) -> str:
+        """Detect whether connected chip is ESP8266 or ESP32"""
+        try:
+            info = self.get_chip_info(port)
+            chip_type = info.get('chip_type', '').lower()
+            if 'esp32' in chip_type:
+                return 'esp32'
+            return 'esp8266'
+        except Exception:
+            return 'esp8266'
 
     def _get_esptool_path(self) -> str:
         """Get esptool entry point or module"""
@@ -290,9 +302,12 @@ class ESP8266Flasher:
                 print(f"{i}. {p['port']} - {p['description']} {flag}")
             print()
 
-    def display_flash_summary(self, port: str, baud_rate: int):
+    def display_flash_summary(self, port: str, baud_rate: int, chip: str = "auto"):
         """Display configuration summary table before flashing"""
-        firmware_size = os.path.getsize(self.firmware_path)
+        chip_name = "ESP32" if "esp32" in (chip or "").lower() else "ESP8266"
+        fw_path = self._get_firmware_path(chip)
+        flash_addr = "0x10000" if chip_name == "ESP32" else self.FLASH_ADDRESS
+        firmware_size = os.path.getsize(fw_path)
         firmware_size_kb = firmware_size / 1024
 
         if RICH_AVAILABLE and console:
@@ -300,22 +315,23 @@ class ESP8266Flasher:
             table.add_column("Parameter", style="bold cyan", width=18)
             table.add_column("Value", style="white")
 
-            table.add_row("Target Architecture", "ESP8266 (NodeMCU / Generic)")
+            table.add_row("Target Architecture", f"{chip_name} (Auto-detected)")
             table.add_row("Serial Port", port)
             table.add_row("Baud Rate", f"{baud_rate} bps")
             table.add_row("Flash Mode", f"{self.DEFAULT_FLASH_MODE.upper()} / 40MHz")
-            table.add_row("Firmware Binary", f"{firmware_size_kb:.1f} KB ({self.firmware_path})")
-            table.add_row("Flash Address", self.FLASH_ADDRESS)
+            table.add_row("Firmware Binary", f"{firmware_size_kb:.1f} KB ({fw_path})")
+            table.add_row("Flash Address", flash_addr)
 
             panel = Panel(table, title="[bold white]Flash Configuration[/bold white]", box=box.ROUNDED, border_style="cyan")
             console.print(panel)
         else:
             print("-" * 50)
-            print(f"Target: ESP8266 | Port: {port} | Baud: {baud_rate}")
-            print(f"Firmware: {firmware_size_kb:.1f} KB | Addr: {self.FLASH_ADDRESS}")
+            print(f"Target: {chip_name} | Port: {port} | Baud: {baud_rate}")
+            print(f"Firmware: {firmware_size_kb:.1f} KB | Addr: {flash_addr}")
             print("-" * 50)
 
     def _execute_flash(self, port: str, baud_rate: int, erase_flash: bool,
+                       chip: str = "auto",
                        callbacks: Optional[Any] = None,
                        progress_callback: Optional[Callable] = None) -> bool:
         """Execute esptool flash with unbuffered real-time output streaming"""
@@ -324,8 +340,18 @@ class ESP8266Flasher:
             py_cmd.append("-P")
         py_cmd.extend(["-u", "-m", "esptool"])
 
+        chip_lower = (chip or "auto").lower()
+        if "esp32" in chip_lower:
+            target_chip = "esp32"
+            flash_addr = "0x10000"
+            fw_path = self._get_firmware_path("esp32")
+        else:
+            target_chip = "esp8266"
+            flash_addr = self.FLASH_ADDRESS
+            fw_path = self._get_firmware_path("esp8266")
+
         cmd = py_cmd + [
-            "--chip", "esp8266",
+            "--chip", target_chip,
             "--port", port,
             "--baud", str(baud_rate),
             "--connect-attempts", "10",
@@ -338,9 +364,9 @@ class ESP8266Flasher:
         if erase_flash:
             cmd.append("--erase-all")
 
-        cmd.extend([self.FLASH_ADDRESS, self.firmware_path])
+        cmd.extend([flash_addr, fw_path])
 
-        firmware_size = os.path.getsize(self.firmware_path) if os.path.exists(self.firmware_path) else 0
+        firmware_size = os.path.getsize(fw_path) if os.path.exists(fw_path) else 0
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -459,13 +485,14 @@ class ESP8266Flasher:
     def flash_firmware(self,
                        port: Optional[str] = None,
                        baud_rate: int = DEFAULT_BAUD_RATE,
+                       chip: str = "auto",
                        erase_flash: bool = True,
                        verify: bool = True,
                        callbacks: Optional[Any] = None,
                        progress_callback: Optional[Callable] = None,
                        use_progress_bar: bool = True) -> bool:
         """
-        Flash ESP-Linker firmware to ESP8266 with automatic baud fallback and deadlock prevention.
+        Flash ESP-Linker firmware to ESP8266/ESP32 with automatic baud fallback and deadlock prevention.
         """
         from .ui import ui, RichFlashProgressCallback
 
@@ -473,27 +500,28 @@ class ESP8266Flasher:
         if port is None:
             ports = self.detect_esp8266_ports()
             if not ports:
-                raise DeviceNotFoundError("No USB serial ports detected. Connect your ESP8266 board via USB.")
+                raise DeviceNotFoundError("No USB serial ports detected. Connect your ESP board via USB.")
             if len(ports) == 1:
                 port = ports[0]['port']
                 ui.success(f"Detected board on serial port: [bold cyan]{port}[/bold cyan] ({ports[0]['description']})")
             else:
                 choices = [
                     {
-                        "title": f"{p['port']}  -  {p['description']}" + (" [Likely ESP8266]" if p['likely_esp'] else ""),
+                        "title": f"{p['port']}  -  {p['description']}" + (" [Likely ESP board]" if p['likely_esp'] else ""),
                         "value": p['port']
                     }
                     for p in ports
                 ]
-                port = ui.select_menu("Select serial port for ESP8266:", choices, default=ports[0]['port'])
+                port = ui.select_menu("Select serial port for ESP board:", choices, default=ports[0]['port'])
                 ui.success(f"Selected serial port: [bold cyan]{port}[/bold cyan]")
         else:
             ui.info(f"Using specified serial port: [bold cyan]{port}[/bold cyan]")
 
-        if not os.path.exists(self.firmware_path):
-            raise FlashError(f"Firmware binary missing: {self.firmware_path}")
+        target_chip = chip
+        if not target_chip or target_chip == "auto":
+            target_chip = self.detect_chip_type(port)
 
-        fw_info = self.get_firmware_info()
+        fw_info = self.get_firmware_info(target_chip)
         ui.show_firmware_panel(fw_info, port, baud_rate)
 
         if callbacks is None and use_progress_bar:
@@ -503,7 +531,7 @@ class ESP8266Flasher:
             callbacks.on_start(port, baud_rate, fw_info)
 
         try:
-            success = self._execute_flash(port, baud_rate, erase_flash, callbacks, progress_callback)
+            success = self._execute_flash(port, baud_rate, erase_flash, target_chip, callbacks, progress_callback)
         except TimeoutError as e:
             if baud_rate != self.FALLBACK_BAUD_RATE:
                 ui.warn(f"High-speed baud rate ({baud_rate}) timed out.")
@@ -523,7 +551,7 @@ class ESP8266Flasher:
                 time.sleep(1.0)
                 if callbacks and hasattr(callbacks, "on_start"):
                     callbacks.on_start(port, self.FALLBACK_BAUD_RATE, fw_info)
-                success = self._execute_flash(port, self.FALLBACK_BAUD_RATE, erase_flash, callbacks, progress_callback)
+                success = self._execute_flash(port, self.FALLBACK_BAUD_RATE, erase_flash, target_chip, callbacks, progress_callback)
             else:
                 raise FlashError(str(e))
         except FlashError:
@@ -548,54 +576,89 @@ class ESP8266Flasher:
         py_cmd.extend(["-m", "esptool"])
 
         cmd = py_cmd + [
-            "--chip", "esp8266",
             "--port", port,
             "--baud", str(self.FALLBACK_BAUD_RATE),
-            "chip-id"
+            "chip_id"
         ]
 
         safe_cwd = tempfile.gettempdir()
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=safe_cwd)
         if result.returncode != 0:
-            cmd[-1] = "chip_id"
+            cmd[-1] = "chip-id"
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=safe_cwd)
+        if result.returncode != 0:
+            cmd[-1] = "flash_id"
             result = subprocess.run(cmd, capture_output=True, text=True, cwd=safe_cwd)
 
         if result.returncode != 0:
             raise FlashError(f"Failed to query chip info: {result.stderr or result.stdout}")
 
-        output = result.stdout
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        detected_type = 'ESP32' if 'ESP32' in output else 'ESP8266'
         chip_info = {
             'port': port,
-            'chip_type': 'ESP8266',
+            'chip_type': detected_type,
             'raw_output': output
         }
 
         for line in output.splitlines():
-            if 'Chip ID:' in line or 'Chip is' in line:
+            if 'Chip is' in line:
+                chip_info['chip_model'] = line.split('Chip is')[-1].strip()
+                if 'ESP32' in line:
+                    chip_info['chip_type'] = 'ESP32'
+                elif 'ESP8266' in line:
+                    chip_info['chip_type'] = 'ESP8266'
+            elif 'Chip ID:' in line:
                 chip_info['chip_id'] = line.split(':')[-1].strip()
             elif 'MAC:' in line:
-                chip_info['mac_address'] = line.split(':')[-1].strip()
+                chip_info['mac_address'] = line.split('MAC:')[-1].strip()
             elif 'Features:' in line:
                 chip_info['features'] = line.split(':')[-1].strip()
 
         return chip_info
 
-    def get_firmware_info(self) -> Dict[str, Any]:
+    def get_firmware_info(self, chip: str = "auto") -> Dict[str, Any]:
         """Get bundled firmware metadata"""
-        if not os.path.exists(self.firmware_path):
-            raise FlashError("Firmware binary not found")
+        fw_path = self._get_firmware_path(chip)
+        target_name = "ESP32" if "esp32" in (chip or "").lower() else "ESP8266"
+        flash_addr = "0x10000" if target_name == "ESP32" else "0x00000"
 
-        stat = os.stat(self.firmware_path)
+        if not os.path.exists(fw_path):
+            raise FlashError(f"Firmware binary for {target_name} not found: {fw_path}")
+
+        stat = os.stat(fw_path)
 
         return {
-            'path': self.firmware_path,
+            'path': fw_path,
             'size': stat.st_size,
             'size_kb': round(stat.st_size / 1024, 1),
             'modified': time.ctime(stat.st_mtime),
             'version': __firmware_version__,
-            'name': 'ESP-Linker Firmware',
-            'description': 'Universal ESP-Linker firmware with WiFi configuration, Serial CLI, and PyFirmata-style GPIO control'
+            'name': f'ESP-Linker Firmware ({target_name})',
+            'target_board': f'{target_name} (Auto-detected)',
+            'flash_address': flash_addr,
+            'description': f'Universal wireless GPIO firmware with I2C, OTA updates, and real-time SSE events for {target_name}'
         }
+
+
+# Backwards compatibility and modern alias
+ESPFlasher = ESP8266Flasher
+
+
+def flash_esp(port: Optional[str] = None,
+              baud_rate: int = ESP8266Flasher.DEFAULT_BAUD_RATE,
+              chip: str = "auto",
+              erase_flash: bool = True,
+              progress_callback: Optional[Callable] = None) -> bool:
+    """Convenience function to flash ESP-Linker firmware to ESP8266 or ESP32"""
+    flasher = ESP8266Flasher(chip=chip)
+    return flasher.flash_firmware(
+        port=port,
+        baud_rate=baud_rate,
+        chip=chip,
+        erase_flash=erase_flash,
+        progress_callback=progress_callback
+    )
 
 
 def flash_esp8266(port: Optional[str] = None,
@@ -603,22 +666,16 @@ def flash_esp8266(port: Optional[str] = None,
                   erase_flash: bool = True,
                   progress_callback: Optional[Callable] = None) -> bool:
     """Convenience function to flash ESP-Linker firmware"""
-    flasher = ESP8266Flasher()
-    return flasher.flash_firmware(
-        port=port,
-        baud_rate=baud_rate,
-        erase_flash=erase_flash,
-        progress_callback=progress_callback
-    )
+    return flash_esp(port=port, baud_rate=baud_rate, chip="esp8266", erase_flash=erase_flash, progress_callback=progress_callback)
 
 
 def detect_esp8266() -> List[Dict[str, Any]]:
-    """Detect connected ESP8266 boards"""
+    """Detect connected ESP8266/ESP32 boards"""
     flasher = ESP8266Flasher()
     return flasher.detect_esp8266_ports()
 
 
 def get_chip_info(port: Optional[str] = None) -> Dict[str, Any]:
-    """Get ESP8266 chip information"""
+    """Get ESP chip information"""
     flasher = ESP8266Flasher()
     return flasher.get_chip_info(port)

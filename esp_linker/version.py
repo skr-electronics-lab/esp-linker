@@ -6,13 +6,13 @@ Single source of truth for version numbers across firmware and library
 """
 
 # Version information - SINGLE SOURCE OF TRUTH
-__version__ = "1.3.9"
-__firmware_version__ = "1.3.9"
+__version__ = "1.4.0"
+__firmware_version__ = "1.4.0"
 
 # Version components
 VERSION_MAJOR = 1
-VERSION_MINOR = 3
-VERSION_PATCH = 9
+VERSION_MINOR = 4
+VERSION_PATCH = 0
 
 # Build version tuple
 VERSION_TUPLE = (VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH)

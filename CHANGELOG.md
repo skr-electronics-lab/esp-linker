@@ -5,6 +5,16 @@ All notable changes to ESP-Linker will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-07
+
+### Added
+- **ESP32 & Multi-Architecture Support**: Built dual-target firmware images for both ESP8266 (NodeMCU, D1 Mini) and ESP32 (DevKit, NodeMCU-32S). Automatic chip type detection via `detect_chip_type()` in `ESPFlasher` and `--chip {auto,esp8266,esp32}` CLI flag.
+- **I2C Hardware Bus & Sensors**: Complete I2C bus primitives (`board.i2c_scan()`, `board.i2c_read()`, `board.i2c_write()`, `board.i2c_transfer()`) and high-level sensor telemetry drivers for MPU-6050 6-axis IMU and BMP280 / BME280 barometers.
+- **Over-The-Air (OTA) Firmware Flashing**: Seamless WiFi firmware flashing via `board.ota_flash(path, progress_callback)` and CLI `esp-linker ota <IP>`.
+- **Real-Time Interrupt Events (SSE)**: Asynchronous pin change notifications using Server-Sent Events (SSE) `/api/events` via `board.on_change(pin, callback, mode)` and CLI `esp-linker events <IP>`.
+- **Modern Hardware Control Dashboard**: Redesigned dark-theme glassmorphism browser dashboard in `dashboard.py` featuring live GPIO matrix, 16x8 I2C hex bus scanner, drag-and-drop OTA upload zone, and zero emojis.
+- **New CLI Utilities**: Added `esp-linker ota`, `esp-linker i2c`, and `esp-linker events` with Rich formatting and zero emojis.
+
 ## [1.3.9] - 2025-10-07
 
 ### Fixed

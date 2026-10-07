@@ -24,7 +24,9 @@ from .exceptions import (
     FlashError
 )
 from .flasher import (
+    ESPFlasher,
     ESP8266Flasher,
+    flash_esp,
     flash_esp8266,
     detect_esp8266,
     get_chip_info,
@@ -435,15 +437,22 @@ def discover_devices_entry():
     discover_devices_cli()
 
 def flash_esp8266_cli():
-    """Command-line ESP8266 firmware flashing tool"""
+    """Command-line ESP8266 / ESP32 firmware flashing tool"""
     parser = argparse.ArgumentParser(
-        description="Flash ESP-Linker firmware to ESP8266",
+        description="Flash ESP-Linker firmware to ESP8266 or ESP32",
         prog="esp-linker flash"
     )
     parser.add_argument(
         "--port", "-p",
         type=str,
         help="Serial port (auto-detected if not specified)"
+    )
+    parser.add_argument(
+        "--chip", "-c",
+        type=str,
+        choices=["auto", "esp8266", "esp32"],
+        default="auto",
+        help="Target chip architecture (default: auto)"
     )
     parser.add_argument(
         "--baud", "-b",
@@ -464,7 +473,7 @@ def flash_esp8266_cli():
     parser.add_argument(
         "--chip-info",
         action="store_true",
-        help="Show ESP8266 chip information"
+        help="Show chip information"
     )
     parser.add_argument(
         "--firmware-info",
@@ -487,7 +496,7 @@ def flash_esp8266_cli():
     ui.configure(plain=args.plain or ui.plain_mode, debug=args.debug or ui.debug_mode)
 
     try:
-        flasher = ESP8266Flasher()
+        flasher = ESPFlasher(chip_type=args.chip)
 
         # List ports
         if args.list_ports:
@@ -611,6 +620,343 @@ def test_device_entry():
 def flash_esp8266_entry():
     """Entry point for esp-linker-flash command"""
     flash_esp8266_cli()
+
+
+def ota_cli():
+    """Command-line Over-The-Air (OTA) firmware update tool"""
+    parser = argparse.ArgumentParser(
+        description="Flash ESP-Linker firmware Over-The-Air (OTA) via WiFi",
+        prog="esp-linker ota"
+    )
+    parser.add_argument(
+        "device",
+        help="Device IP address or URL (e.g. 192.168.1.100 or http://192.168.1.100)"
+    )
+    parser.add_argument(
+        "--firmware", "-f",
+        type=str,
+        default=None,
+        help="Path to compiled firmware .bin file (bundled firmware used if omitted)"
+    )
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="Disable rich colors and animations"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode"
+    )
+
+    args = parser.parse_args()
+    ui.configure(plain=args.plain or ui.plain_mode, debug=args.debug or ui.debug_mode)
+    ui.banner("ESP-LINKER", "Over-The-Air (OTA) Firmware Flasher")
+
+    device_url = args.device
+    if not device_url.startswith("http"):
+        device_url = f"http://{device_url}"
+
+    try:
+        board = ESPBoard(url=device_url, timeout=5.0)
+        ui.step(f"Connecting to target board at [bold white]{board.ip}[/bold white]...")
+        status = board.status()
+        arch = status.get("arch", board.architecture)
+        ui.success(f"Connected to {status.get('firmware_name', 'ESP-Linker')} v{status.get('firmware_version', '1.0')} [cyan]({arch})[/cyan]")
+
+        firmware_path = args.firmware
+        if not firmware_path:
+            pkg_dir = os.path.dirname(os.path.abspath(__file__))
+            bin_name = "esp-linker-esp32.bin" if arch == "ESP32" else "esp-linker-esp8266.bin"
+            bundled_path = os.path.join(pkg_dir, "firmware", bin_name)
+            if not os.path.exists(bundled_path):
+                bundled_path = os.path.join(pkg_dir, "firmware", "esp-linker-firmware.bin")
+            firmware_path = bundled_path
+
+        if not os.path.exists(firmware_path):
+            ui.error(f"Firmware binary not found: {firmware_path}")
+            sys.exit(1)
+
+        file_size = os.path.getsize(firmware_path)
+        ui.info(f"Target Binary: [bold white]{os.path.basename(firmware_path)}[/bold white] ({file_size:,} bytes / {file_size/1024:.1f} KB)")
+
+        if RICH_AVAILABLE and ui.console and not ui.plain_mode:
+            from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TransferSpeedColumn
+            with Progress(
+                TextColumn("[bold cyan]OTA Flashing[/bold cyan]"),
+                BarColumn(complete_style="cyan", finished_style="green"),
+                TextColumn("[bold white]{task.percentage:>3.0f}%[/bold white]"),
+                TransferSpeedColumn(),
+                TimeRemainingColumn(),
+                console=ui.console
+            ) as progress:
+                task_id = progress.add_task("ota", total=file_size)
+                def on_progress(sent, total):
+                    progress.update(task_id, completed=sent, total=total)
+
+                ui.step("Streaming firmware binary over WiFi...")
+                success = board.ota_flash(firmware_path, progress_callback=on_progress)
+        else:
+            def on_progress(sent, total):
+                pct = int((sent / total) * 100) if total > 0 else 0
+                print(f"[*] OTA Progress: {sent}/{total} bytes ({pct}%)", end="\r")
+
+            print("[*] Uploading firmware binary...")
+            success = board.ota_flash(firmware_path, progress_callback=on_progress)
+            print()
+
+        if success:
+            ui.success("OTA update installed successfully! Board is rebooting into new firmware.")
+            ui.info("Wait approximately 5 seconds for board to reconnect to WiFi.")
+        else:
+            ui.error("OTA update failed.")
+            sys.exit(1)
+
+    except Exception as e:
+        ui.error(f"OTA Error: {e}")
+        sys.exit(1)
+
+
+def i2c_cli():
+    """Command-line I2C bus scanner and peripheral controller"""
+    parser = argparse.ArgumentParser(
+        description="ESP-Linker I2C Bus Diagnostic and Transceiver Tool",
+        prog="esp-linker i2c"
+    )
+    parser.add_argument("device", help="Device IP address or URL")
+    parser.add_argument("action", choices=["scan", "read", "write", "sensors"], nargs="?", default="scan", help="Action (default: scan)")
+    parser.add_argument("--address", "-a", type=str, help="I2C peripheral address (e.g. 0x68 or 104)")
+    parser.add_argument("--register", "-r", type=str, default=None, help="Register address (e.g. 0x3B or 59)")
+    parser.add_argument("--length", "-l", type=int, default=1, help="Number of bytes to read (default: 1)")
+    parser.add_argument("--data", "-d", type=str, default=None, help="Bytes to write as comma-separated hex/decimal (e.g. 0x6B,0x00)")
+    parser.add_argument("--plain", action="store_true", help="Disable rich formatting")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
+
+    args = parser.parse_args()
+    ui.configure(plain=args.plain or ui.plain_mode, debug=args.debug or ui.debug_mode)
+
+    device_url = args.device
+    if not device_url.startswith("http"):
+        device_url = f"http://{device_url}"
+
+    try:
+        board = ESPBoard(url=device_url, timeout=5.0)
+
+        def parse_int(val, name):
+            if val is None:
+                ui.error(f"Missing required parameter: --{name}")
+                sys.exit(1)
+            try:
+                if str(val).startswith("0x") or str(val).startswith("0X"):
+                    return int(val, 16)
+                return int(val)
+            except ValueError:
+                ui.error(f"Invalid integer value for {name}: {val}")
+                sys.exit(1)
+
+        KNOWN_I2C = {
+            0x20: "PCF8574 I/O Expander",
+            0x27: "PCF8574 I2C LCD Backlight",
+            0x38: "AHT10 / AHT20 Temp & Humidity",
+            0x39: "TSL2561 Light Sensor",
+            0x3C: "SSD1306 / SH1106 OLED Display (0.96 inch)",
+            0x3D: "SSD1306 OLED Display (Alternative)",
+            0x48: "ADS1115 / TMP102 16-bit ADC",
+            0x50: "AT24C32 / AT24C64 EEPROM",
+            0x57: "MAX30100 / MAX30102 Pulse Oximeter",
+            0x68: "MPU6050 / DS3231 RTC / IMU",
+            0x76: "BMP280 / BME280 Environmental Sensor",
+            0x77: "BMP280 / BME280 (Alternative Address)",
+        }
+
+        if args.action == "scan":
+            ui.banner("ESP-LINKER", "I2C Hardware Bus Scanner")
+            ui.step(f"Scanning I2C peripheral addresses on [bold white]{board.ip}[/bold white]...")
+            addresses = board.i2c_scan()
+
+            if RICH_AVAILABLE and ui.console and not ui.plain_mode:
+                from rich.table import Table
+                from rich import box
+                matrix = Table(
+                    title=f"I2C Bus Address Map ({len(addresses)} device(s) found)",
+                    box=box.ROUNDED,
+                    border_style=ui.COLOR_BORDER,
+                    header_style=f"bold {ui.COLOR_PRIMARY}"
+                )
+                matrix.add_column("     ", style="dim cyan", width=5)
+                for col in range(16):
+                    matrix.add_column(f"{col:02X}", justify="center", width=4)
+
+                for row in range(0, 8):
+                    row_base = row * 16
+                    row_cells = [f"{row_base:02X}:"]
+                    for col in range(16):
+                        addr = row_base + col
+                        if addr < 0x08 or addr > 0x77:
+                            row_cells.append("[dim]--[/dim]")
+                        elif addr in addresses:
+                            row_cells.append(f"[bold {ui.COLOR_SUCCESS}]{addr:02X}[/bold {ui.COLOR_SUCCESS}]")
+                        else:
+                            row_cells.append("[dim]. [/dim]")
+                    matrix.add_row(*row_cells)
+
+                ui.console.print(matrix)
+
+                if addresses:
+                    dev_table = Table(
+                        title="Identified Peripheral Devices",
+                        box=box.ROUNDED,
+                        border_style=ui.COLOR_BORDER,
+                        header_style="bold cyan"
+                    )
+                    dev_table.add_column("Address", style="bold white", width=12)
+                    dev_table.add_column("Identified Hardware Device", style="green")
+
+                    for addr in addresses:
+                        ident = KNOWN_I2C.get(addr, "Unknown I2C Peripheral")
+                        dev_table.add_row(f"0x{addr:02X} ({addr})", ident)
+                    ui.console.print(dev_table)
+                else:
+                    ui.warn("No I2C peripherals responded. Check wiring on SDA/SCL pins.")
+            else:
+                print(f"Discovered {len(addresses)} I2C address(es):")
+                for addr in addresses:
+                    ident = KNOWN_I2C.get(addr, "Unknown device")
+                    print(f"  - 0x{addr:02X} ({addr}): {ident}")
+
+        elif args.action == "read":
+            addr = parse_int(args.address, "address")
+            reg = parse_int(args.register, "register") if args.register is not None else None
+            ui.step(f"Reading {args.length} byte(s) from 0x{addr:02X} (register: {args.register or 'none'})...")
+            data = board.i2c_read(addr, args.length, register=reg)
+            hex_str = " ".join([f"0x{b:02X}" for b in data])
+            ui.success(f"Received {len(data)} bytes: {hex_str} (dec: {data})")
+
+        elif args.action == "write":
+            addr = parse_int(args.address, "address")
+            if not args.data:
+                ui.error("Missing --data argument (e.g. --data 0x6B,0x00)")
+                sys.exit(1)
+            raw_bytes = [int(x.strip(), 16 if '0x' in x or '0X' in x else 10) for x in args.data.split(',')]
+            ui.step(f"Writing {len(raw_bytes)} byte(s) to 0x{addr:02X}...")
+            res = board.i2c_write(addr, raw_bytes)
+            ui.success(f"I2C write complete: {res.get('message', 'OK')}")
+
+        elif args.action == "sensors":
+            ui.banner("ESP-LINKER", "Hardware Sensor Telemetry")
+            ui.step(f"Interrogating onboard I2C sensors at [bold white]{board.ip}[/bold white]...")
+            try:
+                mpu = board.read_mpu6050()
+                if RICH_AVAILABLE and ui.console and not ui.plain_mode:
+                    from rich.table import Table
+                    from rich import box
+                    t = Table(title="MPU-6050 6-Axis Motion Tracking Sensor (0x68)", box=box.ROUNDED, border_style=ui.COLOR_BORDER)
+                    t.add_column("Channel", style="bold cyan")
+                    t.add_column("Value", style="bold white")
+                    t.add_column("Unit", style="dim")
+                    t.add_row("Accel X", str(mpu['accel_x']), "G")
+                    t.add_row("Accel Y", str(mpu['accel_y']), "G")
+                    t.add_row("Accel Z", str(mpu['accel_z']), "G")
+                    t.add_row("Temperature", str(mpu['temp_c']), "deg C")
+                    t.add_row("Gyro X", str(mpu['gyro_x']), "deg/s")
+                    t.add_row("Gyro Y", str(mpu['gyro_y']), "deg/s")
+                    t.add_row("Gyro Z", str(mpu['gyro_z']), "deg/s")
+                    ui.console.print(t)
+                else:
+                    print(f"MPU6050: {mpu}")
+            except Exception as e:
+                ui.info(f"MPU6050 not responding: {e}")
+
+            for test_addr in [0x76, 0x77]:
+                try:
+                    bmp = board.read_bmp280(test_addr)
+                    if bmp['model'] != "Unknown":
+                        ui.success(f"Detected {bmp['model']} at {bmp['address']} (Chip ID: {bmp['chip_id']})")
+                except Exception:
+                    pass
+
+    except Exception as e:
+        ui.error(f"I2C Operation Failed: {e}")
+        sys.exit(1)
+
+
+def events_cli():
+    """Live GPIO interrupt event stream tool"""
+    parser = argparse.ArgumentParser(
+        description="Stream real-time GPIO interrupt change events from ESP-Linker device",
+        prog="esp-linker events"
+    )
+    parser.add_argument("device", help="Device IP address or URL")
+    parser.add_argument("--pin", "-p", type=int, default=None, help="Watch a specific GPIO pin (default: all)")
+    parser.add_argument("--mode", "-m", choices=["CHANGE", "RISING", "FALLING"], default="CHANGE", help="Interrupt trigger mode (default: CHANGE)")
+    parser.add_argument("--plain", action="store_true", help="Disable rich formatting")
+
+    args = parser.parse_args()
+    ui.configure(plain=args.plain or ui.plain_mode)
+    ui.banner("ESP-LINKER", "Real-Time Hardware Interrupt Monitor")
+
+    device_url = args.device
+    if not device_url.startswith("http"):
+        device_url = f"http://{device_url}"
+
+    try:
+        board = ESPBoard(url=device_url, timeout=5.0)
+        ui.step(f"Connected to [bold white]{board.ip}[/bold white]. Initializing event subscription...")
+
+        if args.pin is not None:
+            ui.info(f"Subscribing to GPIO {args.pin} on {args.mode} interrupts...")
+            def event_handler(evt):
+                ts = time.strftime('%H:%M:%S')
+                pin_num = evt.get('pin', args.pin)
+                state = evt.get('state', 'UNKNOWN')
+                state_str = "[bold green]HIGH[/bold green]" if str(state) == "1" else "[bold red]LOW[/bold red]"
+                if RICH_AVAILABLE and ui.console and not ui.plain_mode:
+                    ui.console.print(f"[{ts}] [bold cyan]EVENT[/bold cyan] GPIO {pin_num} -> {state_str} (mode: {args.mode})")
+                else:
+                    print(f"[{ts}] EVENT GPIO {pin_num} -> {state} (mode: {args.mode})")
+
+            board.on_change(args.pin, event_handler, mode=args.mode)
+            ui.success(f"Watching GPIO {args.pin}. Press Ctrl+C to stop.")
+        else:
+            ui.info("Subscribing to active board events via SSE stream...")
+            def global_handler(evt):
+                ts = time.strftime('%H:%M:%S')
+                pin_num = evt.get('pin', '?')
+                state = evt.get('state', '?')
+                state_str = "[bold green]HIGH[/bold green]" if str(state) == "1" else "[bold red]LOW[/bold red]"
+                if RICH_AVAILABLE and ui.console and not ui.plain_mode:
+                    ui.console.print(f"[{ts}] [bold cyan]INTERRUPT[/bold cyan] GPIO {pin_num} -> {state_str}")
+                else:
+                    print(f"[{ts}] INTERRUPT GPIO {pin_num} -> {state}")
+
+            board.on_change(0, global_handler, mode="CHANGE")
+            ui.success("Streaming live hardware interrupts. Press Ctrl+C to stop.")
+
+        while True:
+            time.sleep(0.5)
+
+    except KeyboardInterrupt:
+        if 'board' in locals():
+            board.stop_events()
+        ui.info("\nEvent monitor terminated by user.")
+    except Exception as e:
+        ui.error(f"Event Monitor Error: {e}")
+        sys.exit(1)
+
+
+def ota_entry():
+    """Entry point for esp-linker-ota command"""
+    ota_cli()
+
+
+def i2c_entry():
+    """Entry point for esp-linker-i2c command"""
+    i2c_cli()
+
+
+def events_entry():
+    """Entry point for esp-linker-events command"""
+    events_cli()
 
 
 def wifi_wizard_cli():
@@ -874,12 +1220,15 @@ def show_help():
         table.add_column("Command", style="bold white", width=18)
         table.add_column("Description", style="white")
 
-        table.add_row("flash", "Auto-detect and flash ESP-Linker firmware to ESP8266")
+        table.add_row("flash", "Auto-detect and flash ESP-Linker firmware to ESP8266 / ESP32 via USB")
+        table.add_row("ota <IP>", "Flash compiled firmware Over-The-Air (OTA) via WiFi")
+        table.add_row("i2c <IP>", "Scan I2C hardware bus and query sensors (MPU6050, BMP280)")
+        table.add_row("events <IP>", "Stream real-time GPIO hardware interrupt events live")
         table.add_row("detect", "Scan connected USB ports and identify ESP boards")
         table.add_row("setup-wifi", "Interactive USB serial WiFi configuration wizard")
         table.add_row("discover", "Scan local network for active ESP-Linker devices")
         table.add_row("test <IP>", "Run hardware diagnostic tests on connected board")
-        table.add_row("dashboard", "Launch local browser-based control dashboard")
+        table.add_row("dashboard", "Launch modern browser-based hardware control dashboard")
         table.add_row("devices", "Manage stored device registry")
         table.add_row("reset --ip <IP>", "Factory reset board settings")
 
@@ -889,11 +1238,15 @@ def show_help():
         ui_print("  1. [bold white]esp-linker flash[/bold white]       - Install firmware via USB")
         ui_print("  2. [bold white]esp-linker setup-wifi[/bold white]  - Configure WiFi credentials")
         ui_print("  3. [bold white]esp-linker discover[/bold white]    - Locate boards on network")
-        ui_print("  4. [bold white]esp-linker dashboard[/bold white]   - Launch browser interface\n")
+        ui_print("  4. [bold white]esp-linker dashboard[/bold white]   - Launch browser interface")
+        ui_print("  5. [bold white]esp-linker ota <IP>[/bold white]   - Upgrade firmware wirelessly\n")
     else:
         print("\nAvailable commands:")
-        print("   flash       - Flash ESP-Linker firmware to ESP8266")
-        print("   detect      - Detect ESP8266 boards via USB")
+        print("   flash       - Flash ESP-Linker firmware to ESP8266 / ESP32 via USB")
+        print("   ota         - Flash firmware Over-The-Air (OTA) via WiFi")
+        print("   i2c         - Scan I2C hardware bus and read/write sensors")
+        print("   events      - Stream real-time GPIO interrupt events live")
+        print("   detect      - Detect ESP boards via USB")
         print("   setup-wifi  - Interactive WiFi configuration wizard")
         print("   discover    - Discover ESP-Linker devices on network")
         print("   test        - Test ESP-Linker device functionality")
@@ -906,7 +1259,7 @@ def reset_device_cli():
         description="Factory reset ESP-Linker device",
         prog="esp-linker reset"
     )
-    parser.add_argument('--ip', required=True, help='ESP8266 IP address')
+    parser.add_argument('--ip', required=True, help='ESP IP address')
     parser.add_argument('--confirm', action='store_true', help='Skip confirmation prompt')
 
     args = parser.parse_args()
@@ -952,15 +1305,15 @@ def wifi_management_cli():
 
     # Status command
     status_parser = subparsers.add_parser('status', help='Check WiFi status')
-    status_parser.add_argument('--ip', required=True, help='ESP8266 IP address')
+    status_parser.add_argument('--ip', required=True, help='ESP IP address')
 
     # Enable AP command
     enable_ap_parser = subparsers.add_parser('enable-ap', help='Enable AP mode')
-    enable_ap_parser.add_argument('--ip', required=True, help='ESP8266 IP address')
+    enable_ap_parser.add_argument('--ip', required=True, help='ESP IP address')
 
     # Disable AP command
     disable_ap_parser = subparsers.add_parser('disable-ap', help='Disable AP mode')
-    disable_ap_parser.add_argument('--ip', required=True, help='ESP8266 IP address')
+    disable_ap_parser.add_argument('--ip', required=True, help='ESP IP address')
 
     args = parser.parse_args()
 
@@ -980,7 +1333,7 @@ def wifi_management_cli():
         sys.exit(1)
 
 def wifi_status_command(ip):
-    """Check WiFi status of ESP8266"""
+    """Check WiFi status of ESP device"""
     print(f"[*] Checking WiFi status for {ip}...")
     try:
         board = ESPBoard(ip, timeout=10)
@@ -1004,11 +1357,10 @@ def wifi_status_command(ip):
         sys.exit(1)
 
 def wifi_enable_ap_command(ip):
-    """Enable AP mode on ESP8266"""
+    """Enable AP mode on ESP device"""
     print(f"[*] Enabling AP mode on {ip}...")
     try:
         board = ESPBoard(ip, timeout=10)
-        # This would require firmware support - for now just show message
         print("[!] AP mode control requires firmware v1.3.7+")
         print("[i] Current firmware supports AP auto-management")
         print("[i] AP mode automatically enables when WiFi disconnects")
@@ -1018,11 +1370,10 @@ def wifi_enable_ap_command(ip):
         sys.exit(1)
 
 def wifi_disable_ap_command(ip):
-    """Disable AP mode on ESP8266"""
+    """Disable AP mode on ESP device"""
     print(f"[*] Disabling AP mode on {ip}...")
     try:
         board = ESPBoard(ip, timeout=10)
-        # This would require firmware support - for now just show message
         print("[!] AP mode control requires firmware v1.3.7+")
         print("[i] Current firmware supports AP auto-management")
         print("[i] AP mode automatically disables when WiFi connects")
@@ -1045,7 +1396,6 @@ def main():
 
 def main_cli():
     """Main CLI function"""
-    # Global UI configuration
     is_tty = sys.stdout.isatty() if hasattr(sys.stdout, 'isatty') else False
     plain = ("--plain" in sys.argv) or (not is_tty)
     debug = "--debug" in sys.argv
@@ -1069,39 +1419,39 @@ def main_cli():
             show_help()
             sys.exit(0)
         elif command == "discover":
-            # Remove 'discover' from sys.argv so argparse works correctly
             sys.argv.pop(1)
             discover_devices_cli()
         elif command == "test":
-            # Remove 'test' from sys.argv so argparse works correctly
             sys.argv.pop(1)
             test_device_cli()
         elif command == "flash":
-            # Remove 'flash' from sys.argv so argparse works correctly
             sys.argv.pop(1)
             flash_esp8266_cli()
+        elif command == "ota":
+            sys.argv.pop(1)
+            ota_cli()
+        elif command == "i2c":
+            sys.argv.pop(1)
+            i2c_cli()
+        elif command == "events":
+            sys.argv.pop(1)
+            events_cli()
         elif command == "detect":
-            # Remove 'detect' from sys.argv so argparse works correctly
             sys.argv.pop(1)
             detect_esp8266_cli()
         elif command == "setup-wifi":
-            # Remove 'setup-wifi' from sys.argv so argparse works correctly
             sys.argv.pop(1)
             wifi_wizard_cli()
         elif command == "devices":
-            # Remove 'devices' from sys.argv so argparse works correctly
             sys.argv.pop(1)
             devices_cli()
         elif command == "dashboard":
-            # Remove 'dashboard' from sys.argv so argparse works correctly
             sys.argv.pop(1)
             dashboard_cli()
         elif command == "wifi":
-            # Remove 'wifi' from sys.argv so argparse works correctly
             sys.argv.pop(1)
             wifi_management_cli()
         elif command == "reset":
-            # Remove 'reset' from sys.argv so argparse works correctly
             sys.argv.pop(1)
             reset_device_cli()
         else:

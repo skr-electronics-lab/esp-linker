@@ -210,19 +210,21 @@ class UIManager:
                 show_header=False
             )
             table.add_column("Property", style=f"bold {self.COLOR_PRIMARY}", width=18)
-            table.add_column("Value", style="white")
+            target_board = info.get("target_board", "ESP8266 / ESP32 (Universal)")
+            flash_addr = info.get("flash_address", "0x00000")
 
-            table.add_row("Target Board", "ESP8266 (NodeMCU / Generic)")
+            table.add_row("Target Board", target_board)
             table.add_row("Serial Port", f"[bold white]{port}[/bold white]")
             table.add_row("Baud Rate", f"{baud:,} bps (auto-fallback 115,200)")
             table.add_row("Firmware Image", f"{info.get('name', 'ESP-Linker Firmware')} v{info.get('version', __firmware_version__)}")
             table.add_row("Binary Size", f"{info.get('size_kb', 0)} KB ({info.get('size', 0):,} bytes)")
-            table.add_row("Flash Target", "0x00000 (dio, 40MHz, 4MB auto-detect)")
+            table.add_row("Flash Target", f"{flash_addr} (dio, 40MHz, auto-detect)")
 
             self.console.print(table)
         else:
+            target_board = info.get("target_board", "ESP8266 / ESP32")
             print("-" * 50)
-            print(f"Target: ESP8266 | Port: {port} | Baud: {baud}")
+            print(f"Target: {target_board} | Port: {port} | Baud: {baud}")
             print(f"Firmware: {info.get('name', 'ESP-Linker')} v{info.get('version', __firmware_version__)} ({info.get('size_kb', 0)} KB)")
             print("-" * 50)
 

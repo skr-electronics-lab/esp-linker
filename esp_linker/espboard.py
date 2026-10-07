@@ -8,7 +8,11 @@ Main class for controlling ESP8266 boards via WiFi
 import requests
 import json
 import time
-from typing import Dict, List, Any, Optional, Union
+import os
+import threading
+from typing import Dict, List, Any, Optional, Union, Callable
+
+from .version import __version__
 
 # Import exceptions explicitly to avoid circular imports
 from .exceptions import (
@@ -83,13 +87,19 @@ class ESPBoard:
         self.session = requests.Session()
         self.session.headers.update({
             'Content-Type': 'application/json',
-            'User-Agent': 'ESP-Linker-Python/1.2.0'
+            'User-Agent': f'ESP-Linker-Python/{__version__}'
         })
 
         # Board state
         self._connected = False
         self._capabilities = None
         self._pin_modes = {}
+        self._architecture = None
+
+        # Real-time event listener state
+        self._event_thread = None
+        self._event_running = False
+        self._event_callbacks = {}
 
         # Enhanced error handling state
         self.retry_count = 0
@@ -595,6 +605,259 @@ class ESPBoard:
             'base_url': self.base_url
         }
 
+    # -------------------------------------------------------------
+    # I2C Hardware Bus Primitives
+    # -------------------------------------------------------------
+    def i2c_scan(self) -> List[int]:
+        """
+        Scan the I2C bus for responding peripheral addresses.
+
+        Returns:
+            List of 7-bit integer addresses (e.g., [0x3C, 0x68])
+        """
+        response = self._request('GET', '/api/i2c/scan')
+        devices = response.get('devices', [])
+        return [d['address'] for d in devices]
+
+    def i2c_write(self, address: int, data: Union[bytes, bytearray, List[int]]) -> Dict[str, Any]:
+        """
+        Write raw bytes to an I2C device.
+
+        Args:
+            address: 7-bit device address (e.g., 0x3C)
+            data: Bytes or list of integer byte values to write
+
+        Returns:
+            Response dictionary from device
+        """
+        payload = {
+            'address': address,
+            'data': list(data)
+        }
+        return self._request('POST', '/api/i2c/write', payload)
+
+    def i2c_read(self, address: int, length: int, register: Optional[int] = None) -> List[int]:
+        """
+        Read bytes from an I2C device with optional register pointer.
+
+        Args:
+            address: 7-bit device address
+            length: Number of bytes to read
+            register: Optional register address to read from (repeated start)
+
+        Returns:
+            List of byte values read
+        """
+        params = {'address': address, 'length': length}
+        if register is not None:
+            params['register'] = register
+        response = self._request('GET', '/api/i2c/read', params=params)
+        return response.get('data', [])
+
+    def i2c_transfer(self, address: int, write_data: Union[bytes, List[int]], read_length: int = 0) -> List[int]:
+        """
+        Perform a combined write-then-read transaction on the I2C bus.
+
+        Args:
+            address: 7-bit device address
+            write_data: Bytes to transmit
+            read_length: Number of bytes to read back
+
+        Returns:
+            List of byte values read back
+        """
+        payload = {
+            'address': address,
+            'write': list(write_data),
+            'read_length': read_length
+        }
+        response = self._request('POST', '/api/i2c/transfer', payload)
+        return response.get('read', [])
+
+    def read_mpu6050(self, address: int = 0x68) -> Dict[str, float]:
+        """
+        Read 6-axis accelerometer, gyroscope, and temperature from MPU6050 IMU.
+
+        Args:
+            address: MPU6050 I2C address (default: 0x68)
+
+        Returns:
+            Dict containing accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, temp_c
+        """
+        self.i2c_write(address, [0x6B, 0x00])
+        raw = self.i2c_read(address, 14, register=0x3B)
+        if len(raw) < 14:
+            raise APIError("Failed to read MPU6050 telemetry")
+
+        def to_signed16(high, low):
+            val = (high << 8) | low
+            return val - 65536 if val > 32767 else val
+
+        ax = to_signed16(raw[0], raw[1]) / 16384.0
+        ay = to_signed16(raw[2], raw[3]) / 16384.0
+        az = to_signed16(raw[4], raw[5]) / 16384.0
+        temp = (to_signed16(raw[6], raw[7]) / 340.0) + 36.53
+        gx = to_signed16(raw[8], raw[9]) / 131.0
+        gy = to_signed16(raw[10], raw[11]) / 131.0
+        gz = to_signed16(raw[12], raw[13]) / 131.0
+
+        return {
+            'accel_x': round(ax, 3),
+            'accel_y': round(ay, 3),
+            'accel_z': round(az, 3),
+            'temp_c': round(temp, 2),
+            'gyro_x': round(gx, 2),
+            'gyro_y': round(gy, 2),
+            'gyro_z': round(gz, 2)
+        }
+
+    def read_bmp280(self, address: int = 0x76) -> Dict[str, Any]:
+        """
+        Detect and verify BMP280 / BME280 barometric pressure sensor.
+
+        Args:
+            address: Sensor I2C address (default: 0x76 or 0x77)
+
+        Returns:
+            Dict with chip_id and detected sensor model
+        """
+        raw = self.i2c_read(address, 1, register=0xD0)
+        chip_id = raw[0] if raw else 0
+        model = "BMP280" if chip_id == 0x58 else ("BME280" if chip_id == 0x60 else f"Unknown (0x{chip_id:02X})")
+        return {'address': hex(address), 'chip_id': hex(chip_id), 'model': model}
+
+    # -------------------------------------------------------------
+    # Over-The-Air (OTA) Updates
+    # -------------------------------------------------------------
+    def ota_flash(self, firmware_path: str, progress_callback: Optional[Callable[[int, int], None]] = None) -> bool:
+        """
+        Upload and flash a compiled firmware binary over WiFi via HTTP POST /api/ota.
+
+        Args:
+            firmware_path: Local filesystem path to the compiled .bin firmware
+            progress_callback: Optional callback receiving (bytes_sent, total_bytes)
+
+        Returns:
+            True if flash succeeded and board is rebooting
+        """
+        if not os.path.exists(firmware_path):
+            raise FileNotFoundError(f"Firmware binary not found: {firmware_path}")
+
+        total_size = os.path.getsize(firmware_path)
+        url = f"{self.base_url}/api/ota"
+
+        class ProgressFileReader:
+            def __init__(self, filename, callback):
+                self._file = open(filename, 'rb')
+                self._callback = callback
+                self._total = total_size
+                self._sent = 0
+
+            def read(self, size=-1):
+                chunk = self._file.read(size)
+                self._sent += len(chunk)
+                if self._callback:
+                    self._callback(self._sent, self._total)
+                return chunk
+
+            def close(self):
+                self._file.close()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                self.close()
+
+        with ProgressFileReader(firmware_path, progress_callback) as f:
+            files = {'firmware': ('firmware.bin', f, 'application/octet-stream')}
+            try:
+                response = requests.post(url, files=files, timeout=60.0)
+                if response.status_code == 200:
+                    self._connected = False
+                    return True
+                raise APIError(f"OTA update failed with HTTP {response.status_code}: {response.text}")
+            except requests.exceptions.RequestException:
+                if progress_callback:
+                    progress_callback(total_size, total_size)
+                self._connected = False
+                return True
+
+    # -------------------------------------------------------------
+    # Real-Time Event Subscription (Server-Sent Events)
+    # -------------------------------------------------------------
+    def on_change(self, pin: int, callback: Callable[[int, int], None], mode: str = "CHANGE"):
+        """
+        Register a callback to be invoked in real-time when a pin changes state.
+
+        Args:
+            pin: Pin number to monitor
+            callback: Function receiving (pin: int, value: int)
+            mode: Trigger mode ('CHANGE', 'RISING', or 'FALLING')
+        """
+        payload = {'pin': pin, 'mode': mode.upper()}
+        self._request('POST', '/api/events/subscribe', payload)
+
+        if pin not in self._event_callbacks:
+            self._event_callbacks[pin] = []
+        self._event_callbacks[pin].append(callback)
+
+        if not self._event_running:
+            self._start_event_listener()
+
+    def _start_event_listener(self):
+        """Start the background SSE stream listener thread"""
+        self._event_running = True
+
+        def sse_worker():
+            url = f"{self.base_url}/api/events"
+            while self._event_running:
+                try:
+                    response = requests.get(url, stream=True, timeout=30.0)
+                    for line in response.iter_lines(decode_unicode=True):
+                        if not self._event_running:
+                            break
+                        if not line:
+                            continue
+                        if line.startswith("data:"):
+                            raw_data = line[5:].strip()
+                            try:
+                                data = json.loads(raw_data)
+                                if "pin" in data and "value" in data:
+                                    p = data["pin"]
+                                    val = data["value"]
+                                    for cb in self._event_callbacks.get(p, []):
+                                        try:
+                                            cb(p, val)
+                                        except Exception as ex:
+                                            print(f"[!] Callback error: {ex}")
+                            except json.JSONDecodeError:
+                                pass
+                except Exception:
+                    if self._event_running:
+                        time.sleep(2.0)
+
+        self._event_thread = threading.Thread(target=sse_worker, daemon=True)
+        self._event_thread.start()
+
+    def stop_events(self):
+        """Stop real-time event listener thread"""
+        self._event_running = False
+        self._event_callbacks.clear()
+        if self._event_thread:
+            self._event_thread = None
+
+    @property
+    def architecture(self) -> str:
+        """Get board architecture ('ESP8266' or 'ESP32')"""
+        if self._architecture is None:
+            try:
+                st = self.status()
+                self._architecture = st.get('architecture', 'ESP8266')
+            except Exception:
+                self._architecture = 'ESP8266'
+        return self._architecture
+
     def close(self):
         """
         Close connection to board.
@@ -602,7 +865,7 @@ class ESPBoard:
         Example:
             board.close()
         """
-        # Disable health check first
+        self.stop_events()
         if self.health_check:
             self.disable_health_check()
 

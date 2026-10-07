@@ -45,7 +45,14 @@ from .exceptions import (
     FlashError
 )
 from .utils import discover_devices, scan_network
-from .flasher import flash_esp8266, detect_esp8266, get_chip_info, ESP8266Flasher
+from .flasher import (
+    flash_esp8266,
+    flash_esp,
+    detect_esp8266,
+    get_chip_info,
+    ESP8266Flasher,
+    ESPFlasher
+)
 from .device_manager import get_device_manager
 
 # Define what gets imported with "from esp_linker import *"
@@ -73,10 +80,12 @@ __all__ = [
     'connect_to_device',
 
     # Firmware flashing functions
+    'flash_esp',
     'flash_esp8266',
     'detect_esp8266',
     'get_chip_info',
     'ESP8266Flasher',
+    'ESPFlasher',
 
     # Device management
     'get_device_manager',

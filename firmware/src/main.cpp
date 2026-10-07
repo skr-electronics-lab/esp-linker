@@ -1,37 +1,56 @@
 /*
-
-© 2025 SK Raihan / SKR Electronics Lab — All Rights Reserved.
-
+(c) 2025 SK Raihan / SKR Electronics Lab -- All Rights Reserved.
 Author: SK Raihan
-
 Website: https://www.skrelectronicslab.com
-
 Email: skrelectronicslab@gmail.com
-
 YouTube: https://www.youtube.com/@skr_electronics_lab
-
 Instagram: https://www.instagram.com/skr_electronics_lab
-
 Twitter: https://www.twitter.com/skrelectronics
+Support: https://ko-fi.com/skrelectronicslab
 
-Buy Me a Coffee: https://buymeacoffee.com/skrelectronics */
+ESP-Linker Universal Firmware
+Dual architecture support: ESP8266 and ESP32
+Features: GPIO, PWM, Servo, I2C, OTA Update, Real-time Events (SSE), Serial CLI
+*/
 
-// ESP-Link Complete Firmware
 #include <Arduino.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
-#include <ESP8266mDNS.h>
+#include <Wire.h>
 #include <ArduinoJson.h>
-#include <Servo.h>
 #include <EEPROM.h>
-#include <ESP8266HTTPUpdateServer.h>
+
+#if defined(ESP32)
+    #include <WiFi.h>
+    #include <WebServer.h>
+    #include <ESPmDNS.h>
+    #include <Update.h>
+    typedef WebServer WebServerType;
+    #define ARCH_NAME "ESP32"
+    #define DEFAULT_SDA 21
+    #define DEFAULT_SCL 22
+    #define MAX_DIGITAL_PINS 40
+    #define LED_PIN 2
+#elif defined(ESP8266)
+    #include <ESP8266WiFi.h>
+    #include <ESP8266WebServer.h>
+    #include <ESP8266mDNS.h>
+    #include <ESP8266HTTPUpdateServer.h>
+    #include <Servo.h>
+    typedef ESP8266WebServer WebServerType;
+    #define ARCH_NAME "ESP8266"
+    #define DEFAULT_SDA 4
+    #define DEFAULT_SCL 5
+    #define MAX_DIGITAL_PINS 17
+    #define LED_PIN 2
+#else
+    #error "Unsupported architecture! Must be ESP8266 or ESP32."
+#endif
 
 // Configuration
+#define FIRMWARE_VERSION "1.3.9"
+#define FIRMWARE_NAME "ESP-Linker"
 #define AP_SSID "ESP_Link"
 #define AP_PASSWORD "12345678"
 #define HTTP_PORT 80
-#define LED_PIN 2
-#define MAX_DIGITAL_PINS 17
 
 // Pin modes
 enum PinMode {
@@ -42,7 +61,7 @@ enum PinMode {
     PIN_SERVO = 4
 };
 
-// Pin capabilities for ESP8266 NodeMCU
+// Pin capabilities
 struct PinCapability {
     uint8_t pin;
     bool digital_io;
@@ -52,31 +71,107 @@ struct PinCapability {
     bool interrupt;
 };
 
+#if defined(ESP32)
 PinCapability pinCapabilities[] = {
-    {0, true, false, false, false, true},   // D3 - GPIO0 (Boot mode pin)
+    {0, true, true, false, true, true},
+    {2, true, true, true, true, true},
+    {4, true, true, true, true, true},
+    {5, true, true, false, true, true},
+    {12, true, true, true, true, true},
+    {13, true, true, true, true, true},
+    {14, true, true, true, true, true},
+    {15, true, true, true, true, true},
+    {16, true, true, false, true, true},
+    {17, true, true, false, true, true},
+    {18, true, true, false, true, true},
+    {19, true, true, false, true, true},
+    {21, true, true, false, true, true}, // SDA
+    {22, true, true, false, true, true}, // SCL
+    {23, true, true, false, true, true},
+    {25, true, true, true, true, true},  // DAC1
+    {26, true, true, true, true, true},  // DAC2
+    {27, true, true, true, true, true},
+    {32, true, true, true, true, true},  // ADC1
+    {33, true, true, true, true, true},  // ADC1
+    {34, false, false, true, false, true}, // Input only ADC1
+    {35, false, false, true, false, true}, // Input only ADC1
+    {36, false, false, true, false, true}, // Input only (VP)
+    {39, false, false, true, false, true}  // Input only (VN)
+};
+#else
+PinCapability pinCapabilities[] = {
+    {0, true, false, false, false, true},   // D3 - GPIO0
     {1, true, false, false, false, true},   // TX - GPIO1
-    {2, true, true, false, true, true},     // D4 - GPIO2 (Built-in LED)
+    {2, true, true, false, true, true},     // D4 - GPIO2
     {3, true, false, false, false, true},   // RX - GPIO3
-    {4, true, true, false, true, true},     // D2 - GPIO4
-    {5, true, true, false, true, true},     // D1 - GPIO5
+    {4, true, true, false, true, true},     // D2 - GPIO4 (SDA)
+    {5, true, true, false, true, true},     // D1 - GPIO5 (SCL)
     {12, true, true, false, true, true},    // D6 - GPIO12
     {13, true, true, false, true, true},    // D7 - GPIO13
     {14, true, true, false, true, true},    // D5 - GPIO14
     {15, true, true, false, true, true},    // D8 - GPIO15
-    {16, true, false, false, false, false}, // D0 - GPIO16 (Wake pin)
+    {16, true, false, false, false, false}  // D0 - GPIO16
 };
+#endif
 
 const int numPins = sizeof(pinCapabilities) / sizeof(PinCapability);
 
 // Global objects
-ESP8266WebServer server(HTTP_PORT);
+WebServerType server(HTTP_PORT);
+#if defined(ESP8266)
 ESP8266HTTPUpdateServer httpUpdater;
+#endif
+
+#if defined(ESP8266)
 Servo servos[MAX_DIGITAL_PINS];
+#endif
 bool servoAttached[MAX_DIGITAL_PINS] = {false};
 uint8_t pinModes[MAX_DIGITAL_PINS];
 unsigned long startTime;
 String savedSSID = "";
 String savedPassword = "";
+
+void writeServoAngle(uint8_t pin, int angle) {
+#if defined(ESP8266)
+    if (!servoAttached[pin]) {
+        servos[pin].attach(pin);
+        servoAttached[pin] = true;
+    }
+    servos[pin].write(angle);
+#else
+    if (!servoAttached[pin]) {
+        ledcAttach(pin, 50, 14); // 50Hz, 14-bit resolution
+        servoAttached[pin] = true;
+    }
+    uint32_t duty = 410 + (uint32_t)((angle * 1638) / 180);
+    ledcWrite(pin, duty);
+#endif
+    pinModes[pin] = PIN_SERVO;
+}
+
+void detachServo(uint8_t pin) {
+    if (servoAttached[pin]) {
+#if defined(ESP8266)
+        servos[pin].detach();
+#else
+        ledcDetach(pin);
+#endif
+        servoAttached[pin] = false;
+    }
+}
+
+// Real-time Event Monitor Struct
+struct PinWatcher {
+    uint8_t pin;
+    uint8_t mode; // 0: CHANGE, 1: RISING, 2: FALLING
+    int lastState;
+    bool active;
+};
+#define MAX_WATCHERS 8
+PinWatcher watchers[MAX_WATCHERS];
+unsigned long lastEventPing = 0;
+WiFiClient sseClient;
+bool sseClientConnected = false;
 
 // EEPROM Configuration
 #define EEPROM_SIZE 512
@@ -101,6 +196,15 @@ void handleRead();
 void handlePWM();
 void handleServo();
 void handleBatch();
+void handleI2CScan();
+void handleI2CWrite();
+void handleI2CRead();
+void handleI2CTransfer();
+void handleEvents();
+void handleEventSubscribe();
+void handleOTAUpload();
+void handleOTAFinish();
+void checkPinEvents();
 void handleNotFound();
 String createResponse(int code, String message);
 bool isValidPin(uint8_t pin);
@@ -110,9 +214,9 @@ void handleSerialCommands();
 
 void setup() {
     Serial.begin(115200);
-    delay(1000);
+    delay(500);
 
-    logMessage("ESP-Link Complete Firmware v1.0.0 Starting...");
+    logMessage(String(FIRMWARE_NAME) + " v" + String(FIRMWARE_VERSION) + " (" + ARCH_NAME + ") Starting...");
 
     // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
@@ -121,6 +225,14 @@ void setup() {
     for (int i = 0; i < MAX_DIGITAL_PINS; i++) {
         pinModes[i] = PIN_INPUT;
     }
+
+    // Initialize watchers
+    for (int i = 0; i < MAX_WATCHERS; i++) {
+        watchers[i].active = false;
+    }
+
+    // Initialize I2C bus
+    Wire.begin(DEFAULT_SDA, DEFAULT_SCL);
 
     // Record start time
     startTime = millis();
@@ -137,26 +249,29 @@ void setup() {
     // Setup mDNS
     setupMDNS();
 
-    logMessage("ESP-Link ready! IP: " + WiFi.localIP().toString());
+    logMessage(String(FIRMWARE_NAME) + " ready. IP: " + WiFi.localIP().toString());
 }
 
 void loop() {
     server.handleClient();
+    #if defined(ESP8266)
     MDNS.update();
+    #endif
     handleSerialCommands();
+    checkPinEvents();
     yield();
 }
 
 void setupWiFi() {
     WiFi.mode(WIFI_AP_STA);
+    #if defined(ESP8266)
     WiFi.setAutoReconnect(true);
+    #endif
 
-    // Try to connect to saved WiFi if available
     if (savedSSID.length() > 0) {
         logMessage("Connecting to WiFi: " + savedSSID);
         WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
 
-        // Wait for connection
         int attempts = 0;
         while (WiFi.status() != WL_CONNECTED && attempts < 20) {
             delay(500);
@@ -166,111 +281,130 @@ void setupWiFi() {
 
         if (WiFi.status() == WL_CONNECTED) {
             Serial.println();
-            logMessage("WiFi connected! IP: " + WiFi.localIP().toString());
+            logMessage("WiFi connected. IP: " + WiFi.localIP().toString());
         } else {
             Serial.println();
-            logMessage("WiFi connection failed");
+            logMessage("WiFi connection failed. Starting AP mode.");
         }
     } else {
-        logMessage("No WiFi credentials saved");
+        logMessage("No WiFi credentials saved in EEPROM.");
     }
 
-    // Always start AP mode as backup
-    logMessage("Starting Access Point...");
     WiFi.softAP(AP_SSID, AP_PASSWORD);
-    logMessage("AP started: " + String(AP_SSID) + " IP: " + WiFi.softAPIP().toString());
-}
-
-void setupServer() {
-    // Configure CORS headers
-    server.enableCORS(true);
-    
-    // API endpoints
-    server.on("/configure_wifi", HTTP_POST, handleConfigureWiFi);
-    server.on("/restart", HTTP_POST, handleRestart);
-    server.on("/status", HTTP_GET, handleStatus);
-    server.on("/capabilities", HTTP_GET, handleCapabilities);
-    server.on("/gpio/set_mode", HTTP_POST, handleSetMode);
-    server.on("/gpio/write", HTTP_POST, handleWrite);
-    server.on("/gpio/read", HTTP_GET, handleRead);
-    server.on("/gpio/pwm", HTTP_POST, handlePWM);
-    server.on("/servo/write", HTTP_POST, handleServo);
-    server.on("/gpio/batch", HTTP_POST, handleBatch);
-    
-    // Simple test endpoints
-    server.on("/", HTTP_GET, []() {
-        String html = "<html><head><title>ESP-Link</title></head><body>";
-        html += "<h1>🔗 ESP-Link Complete</h1>";
-        html += "<p><strong>© 2025 SK Raihan / SKR Electronics Lab</strong></p>";
-        html += "<hr>";
-        html += "<h3>📡 WiFi Status</h3>";
-        if (WiFi.status() == WL_CONNECTED) {
-            html += "<p>✅ Connected to: <strong>" + WiFi.SSID() + "</strong></p>";
-            html += "<p>📍 IP Address: <strong>" + WiFi.localIP().toString() + "</strong></p>";
-        } else {
-            html += "<p>❌ Not connected to WiFi</p>";
-            html += "<p>🔧 Configure WiFi via API: POST /configure_wifi</p>";
-        }
-        html += "<p>📡 AP Mode: <strong>" + String(AP_SSID) + "</strong> (" + WiFi.softAPIP().toString() + ")</p>";
-        html += "<hr>";
-        html += "<h3>🧪 Quick Tests</h3>";
-        html += "<p><a href='/led_on'>💡 LED ON</a> | <a href='/led_off'>💡 LED OFF</a></p>";
-        html += "<p><a href='/status'>📊 Status</a> | <a href='/capabilities'>🔧 Capabilities</a></p>";
-        html += "<hr>";
-        html += "<h3>📚 API Documentation</h3>";
-        html += "<p>WiFi: POST /configure_wifi, POST /restart</p>";
-        html += "<p>GPIO: POST /gpio/set_mode, POST /gpio/write, GET /gpio/read</p>";
-        html += "<p>PWM: POST /gpio/pwm | Servo: POST /servo/write</p>";
-        html += "<p>Batch: POST /gpio/batch</p>";
-        html += "</body></html>";
-        server.send(200, "text/html", html);
-    });
-    
-    server.on("/led_on", HTTP_GET, []() {
-        digitalWrite(LED_PIN, LOW);
-        server.send(200, "text/plain", "LED ON");
-        logMessage("LED turned ON");
-    });
-    
-    server.on("/led_off", HTTP_GET, []() {
-        digitalWrite(LED_PIN, HIGH);
-        server.send(200, "text/plain", "LED OFF");
-        logMessage("LED turned OFF");
-    });
-    
-    // OTA update endpoint
-    httpUpdater.setup(&server, "/update", "admin", "esp-link-ota");
-    
-    // 404 handler
-    server.onNotFound(handleNotFound);
-    
-    server.begin();
-    logMessage("HTTP server started on port " + String(HTTP_PORT));
+    logMessage("AP active: " + String(AP_SSID) + " (" + WiFi.softAPIP().toString() + ")");
 }
 
 void setupMDNS() {
     if (MDNS.begin("esp-link")) {
         MDNS.addService("http", "tcp", HTTP_PORT);
-        logMessage("mDNS responder started: esp-link.local");
+        logMessage("mDNS started: esp-link.local");
     } else {
-        logMessage("Error setting up mDNS responder!");
+        logMessage("mDNS setup failed");
     }
+}
+
+void setupServer() {
+    #if defined(ESP8266)
+    server.enableCORS(true);
+    #endif
+
+    // Core System Endpoints
+    server.on("/configure_wifi", HTTP_POST, handleConfigureWiFi);
+    server.on("/restart", HTTP_POST, handleRestart);
+    server.on("/status", HTTP_GET, handleStatus);
+    server.on("/api/status", HTTP_GET, handleStatus);
+    server.on("/capabilities", HTTP_GET, handleCapabilities);
+    server.on("/api/capabilities", HTTP_GET, handleCapabilities);
+
+    // GPIO Endpoints
+    server.on("/gpio/set_mode", HTTP_POST, handleSetMode);
+    server.on("/api/gpio/set_mode", HTTP_POST, handleSetMode);
+    server.on("/gpio/write", HTTP_POST, handleWrite);
+    server.on("/api/gpio/write", HTTP_POST, handleWrite);
+    server.on("/gpio/read", HTTP_GET, handleRead);
+    server.on("/api/gpio/read", HTTP_GET, handleRead);
+    server.on("/gpio/pwm", HTTP_POST, handlePWM);
+    server.on("/api/gpio/pwm", HTTP_POST, handlePWM);
+    server.on("/servo/write", HTTP_POST, handleServo);
+    server.on("/api/servo/write", HTTP_POST, handleServo);
+    server.on("/gpio/batch", HTTP_POST, handleBatch);
+    server.on("/api/batch", HTTP_POST, handleBatch);
+
+    // I2C Bus Endpoints
+    server.on("/api/i2c/scan", HTTP_GET, handleI2CScan);
+    server.on("/api/i2c/write", HTTP_POST, handleI2CWrite);
+    server.on("/api/i2c/read", HTTP_GET, handleI2CRead);
+    server.on("/api/i2c/transfer", HTTP_POST, handleI2CTransfer);
+
+    // Real-Time Events (Server-Sent Events)
+    server.on("/api/events", HTTP_GET, handleEvents);
+    server.on("/api/events/subscribe", HTTP_POST, handleEventSubscribe);
+
+    // Over-The-Air (OTA) Binary Upload Endpoint
+    server.on("/api/ota", HTTP_POST, handleOTAFinish, handleOTAUpload);
+
+    #if defined(ESP8266)
+    // Legacy HTTP Update Form
+    httpUpdater.setup(&server, "/update", "admin", "esp-link-ota");
+    #endif
+
+    // Simple Built-in Root Page
+    server.on("/", HTTP_GET, []() {
+        String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>ESP-Linker</title>";
+        html += "<style>body{background:#090d16;color:#e2e8f0;font-family:sans-serif;padding:30px;line-height:1.6;}";
+        html += "a{color:#38bdf8;text-decoration:none;}a:hover{text-decoration:underline;}";
+        html += ".card{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:20px;max-width:700px;margin:20px 0;}";
+        html += ".badge{display:inline-block;padding:4px 8px;border-radius:4px;background:#0369a1;font-size:12px;font-weight:bold;}";
+        html += "</style></head><body>";
+        html += "<h2>ESP-Linker " + String(ARCH_NAME) + "</h2>";
+        html += "<div class='card'>";
+        html += "<p><span class='badge'>v" + String(FIRMWARE_VERSION) + "</span> Status: <strong>Online</strong></p>";
+        html += "<p>Architecture: <strong>" + String(ARCH_NAME) + "</strong> | Free Heap: <strong>" + String(ESP.getFreeHeap()) + " bytes</strong></p>";
+        html += "<p>IP Address: <strong>" + WiFi.localIP().toString() + "</strong> | AP SSID: <strong>" + String(AP_SSID) + "</strong></p>";
+        html += "<hr style='border:0;border-top:1px solid #334155;'>";
+        html += "<p>Features: <strong>GPIO, PWM, Servo, I2C Bus, OTA Update, SSE Event Stream</strong></p>";
+        html += "<p><a href='/api/status'>GET /api/status</a> | <a href='/api/capabilities'>GET /api/capabilities</a> | <a href='/api/i2c/scan'>GET /api/i2c/scan</a></p>";
+        html += "</div></body></html>";
+        server.send(200, "text/html", html);
+    });
+
+    server.onNotFound(handleNotFound);
+    server.begin();
+    logMessage("HTTP server started on port " + String(HTTP_PORT));
 }
 
 void handleStatus() {
     DynamicJsonDocument doc(1024);
-    doc["firmware_version"] = "1.0.0";
-    doc["firmware_name"] = "ESP-Link-Complete";
+    doc["firmware_version"] = FIRMWARE_VERSION;
+    doc["firmware_name"] = FIRMWARE_NAME;
+    doc["architecture"] = ARCH_NAME;
     doc["uptime"] = millis() - startTime;
     doc["free_heap"] = ESP.getFreeHeap();
+    #if defined(ESP32)
+    doc["chip_id"] = (uint32_t)ESP.getEfuseMac();
+    doc["flash_size"] = ESP.getFlashChipSize();
+    #else
     doc["chip_id"] = ESP.getChipId();
     doc["flash_size"] = ESP.getFlashChipSize();
+    #endif
     doc["wifi_status"] = WiFi.status();
     doc["wifi_ssid"] = WiFi.SSID();
     doc["wifi_ip"] = WiFi.localIP().toString();
     doc["ap_ip"] = WiFi.softAPIP().toString();
     doc["ap_ssid"] = AP_SSID;
+    #if defined(ESP8266)
     doc["connected_clients"] = WiFi.softAPgetStationNum();
+    #else
+    doc["connected_clients"] = WiFi.softAPgetStationNum();
+    #endif
+
+    JsonArray feat = doc.createNestedArray("features");
+    feat.add("gpio");
+    feat.add("pwm");
+    feat.add("servo");
+    feat.add("i2c");
+    feat.add("ota");
+    feat.add("events");
 
     String response;
     serializeJson(doc, response);
@@ -278,7 +412,9 @@ void handleStatus() {
 }
 
 void handleCapabilities() {
-    DynamicJsonDocument doc(2048);
+    DynamicJsonDocument doc(3072);
+    doc["architecture"] = ARCH_NAME;
+    doc["firmware_version"] = FIRMWARE_VERSION;
     JsonArray pins = doc.createNestedArray("pins");
 
     for (int i = 0; i < numPins; i++) {
@@ -292,9 +428,20 @@ void handleCapabilities() {
     }
 
     JsonObject analogPin = doc.createNestedObject("analog_pin");
+    #if defined(ESP32)
+    analogPin["pin"] = "36";
+    analogPin["resolution"] = 12;
+    analogPin["max_value"] = 4095;
+    #else
     analogPin["pin"] = "A0";
     analogPin["resolution"] = 10;
     analogPin["max_value"] = 1024;
+    #endif
+
+    JsonObject i2c = doc.createNestedObject("i2c");
+    i2c["sda"] = DEFAULT_SDA;
+    i2c["scl"] = DEFAULT_SCL;
+    i2c["supported"] = true;
 
     String response;
     serializeJson(doc, response);
@@ -309,14 +456,8 @@ void handleSetMode() {
 
     DynamicJsonDocument doc(512);
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
-
-    if (error) {
-        server.send(400, "application/json", createResponse(400, "Invalid JSON"));
-        return;
-    }
-
-    if (!doc.containsKey("pin") || !doc.containsKey("mode")) {
-        server.send(400, "application/json", createResponse(400, "Missing pin or mode"));
+    if (error || !doc.containsKey("pin") || !doc.containsKey("mode")) {
+        server.send(400, "application/json", createResponse(400, "Missing pin or mode in JSON payload"));
         return;
     }
 
@@ -334,23 +475,13 @@ void handleSetMode() {
         return;
     }
 
-    if (!isValidPin(pin)) {
-        server.send(400, "application/json", createResponse(400, "Invalid pin"));
+    if (!isValidPin(pin) || !pinSupportsMode(pin, mode)) {
+        server.send(400, "application/json", createResponse(400, "Pin does not support mode"));
         return;
     }
 
-    if (!pinSupportsMode(pin, mode)) {
-        server.send(400, "application/json", createResponse(400, "Pin does not support this mode"));
-        return;
-    }
+    detachServo(pin);
 
-    // Detach servo if previously attached
-    if (servoAttached[pin]) {
-        servos[pin].detach();
-        servoAttached[pin] = false;
-    }
-
-    // Set pin mode
     switch (mode) {
         case PIN_INPUT:
             pinMode(pin, INPUT);
@@ -365,15 +496,12 @@ void handleSetMode() {
             pinMode(pin, OUTPUT);
             break;
         case PIN_SERVO:
-            servos[pin].attach(pin);
-            servoAttached[pin] = true;
+            writeServoAngle(pin, 90);
             break;
     }
 
     pinModes[pin] = mode;
-
     server.send(200, "application/json", createResponse(200, "Pin mode set successfully"));
-    logMessage("Pin " + String(pin) + " mode set to " + modeStr);
 }
 
 void handleWrite() {
@@ -384,13 +512,7 @@ void handleWrite() {
 
     DynamicJsonDocument doc(512);
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
-
-    if (error) {
-        server.send(400, "application/json", createResponse(400, "Invalid JSON"));
-        return;
-    }
-
-    if (!doc.containsKey("pin") || !doc.containsKey("value")) {
+    if (error || !doc.containsKey("pin") || !doc.containsKey("value")) {
         server.send(400, "application/json", createResponse(400, "Missing pin or value"));
         return;
     }
@@ -404,14 +526,12 @@ void handleWrite() {
     }
 
     if (pinModes[pin] != PIN_OUTPUT) {
-        server.send(400, "application/json", createResponse(400, "Pin not set to OUTPUT mode"));
-        return;
+        pinMode(pin, OUTPUT);
+        pinModes[pin] = PIN_OUTPUT;
     }
 
     digitalWrite(pin, value ? HIGH : LOW);
-
     server.send(200, "application/json", createResponse(200, "Pin written successfully"));
-    logMessage("Pin " + String(pin) + " written value " + String(value));
 }
 
 void handleRead() {
@@ -422,14 +542,17 @@ void handleRead() {
 
     String pinStr = server.arg("pin");
 
-    // Check if it's analog pin
-    if (pinStr == "A0") {
+    // Analog reading
+    if (pinStr.equalsIgnoreCase("A0") || pinStr == "36" || pinStr == "39") {
+        #if defined(ESP8266)
         int value = analogRead(A0);
+        #else
+        int value = analogRead(pinStr.equalsIgnoreCase("A0") ? 36 : pinStr.toInt());
+        #endif
         DynamicJsonDocument doc(512);
-        doc["pin"] = "A0";
+        doc["pin"] = pinStr;
         doc["value"] = value;
         doc["type"] = "analog";
-
         String response;
         serializeJson(doc, response);
         server.send(200, "application/json", response);
@@ -437,23 +560,16 @@ void handleRead() {
     }
 
     uint8_t pin = pinStr.toInt();
-    if (pin == 0 && pinStr != "0") {
-        server.send(400, "application/json", createResponse(400, "Invalid pin"));
-        return;
-    }
-
     if (!isValidPin(pin)) {
         server.send(400, "application/json", createResponse(400, "Invalid pin"));
         return;
     }
 
     int value = digitalRead(pin);
-
     DynamicJsonDocument doc(512);
     doc["pin"] = pin;
     doc["value"] = value;
     doc["type"] = "digital";
-
     String response;
     serializeJson(doc, response);
     server.send(200, "application/json", response);
@@ -467,13 +583,7 @@ void handlePWM() {
 
     DynamicJsonDocument doc(512);
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
-
-    if (error) {
-        server.send(400, "application/json", createResponse(400, "Invalid JSON"));
-        return;
-    }
-
-    if (!doc.containsKey("pin") || !doc.containsKey("value")) {
+    if (error || !doc.containsKey("pin") || !doc.containsKey("value")) {
         server.send(400, "application/json", createResponse(400, "Missing pin or value"));
         return;
     }
@@ -481,12 +591,7 @@ void handlePWM() {
     uint8_t pin = doc["pin"];
     int value = doc["value"];
 
-    if (!isValidPin(pin)) {
-        server.send(400, "application/json", createResponse(400, "Invalid pin"));
-        return;
-    }
-
-    if (!pinSupportsMode(pin, PIN_PWM)) {
+    if (!isValidPin(pin) || !pinSupportsMode(pin, PIN_PWM)) {
         server.send(400, "application/json", createResponse(400, "Pin does not support PWM"));
         return;
     }
@@ -496,16 +601,15 @@ void handlePWM() {
         return;
     }
 
-    // Set pin to PWM mode if not already
-    if (pinModes[pin] != PIN_PWM) {
-        pinMode(pin, OUTPUT);
-        pinModes[pin] = PIN_PWM;
-    }
-
+    #if defined(ESP8266)
     analogWrite(pin, value);
+    #else
+    ledcAttach(pin, 5000, 10);
+    ledcWrite(pin, value);
+    #endif
 
-    server.send(200, "application/json", createResponse(200, "PWM set successfully"));
-    logMessage("Pin " + String(pin) + " PWM set to " + String(value));
+    pinModes[pin] = PIN_PWM;
+    server.send(200, "application/json", createResponse(200, "PWM value set successfully"));
 }
 
 void handleServo() {
@@ -516,13 +620,7 @@ void handleServo() {
 
     DynamicJsonDocument doc(512);
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
-
-    if (error) {
-        server.send(400, "application/json", createResponse(400, "Invalid JSON"));
-        return;
-    }
-
-    if (!doc.containsKey("pin") || !doc.containsKey("angle")) {
+    if (error || !doc.containsKey("pin") || !doc.containsKey("angle")) {
         server.send(400, "application/json", createResponse(400, "Missing pin or angle"));
         return;
     }
@@ -530,12 +628,7 @@ void handleServo() {
     uint8_t pin = doc["pin"];
     int angle = doc["angle"];
 
-    if (!isValidPin(pin)) {
-        server.send(400, "application/json", createResponse(400, "Invalid pin"));
-        return;
-    }
-
-    if (!pinSupportsMode(pin, PIN_SERVO)) {
+    if (!isValidPin(pin) || !pinSupportsMode(pin, PIN_SERVO)) {
         server.send(400, "application/json", createResponse(400, "Pin does not support servo"));
         return;
     }
@@ -545,17 +638,8 @@ void handleServo() {
         return;
     }
 
-    // Attach servo if not already attached
-    if (!servoAttached[pin]) {
-        servos[pin].attach(pin);
-        servoAttached[pin] = true;
-        pinModes[pin] = PIN_SERVO;
-    }
-
-    servos[pin].write(angle);
-
+    writeServoAngle(pin, angle);
     server.send(200, "application/json", createResponse(200, "Servo angle set successfully"));
-    logMessage("Pin " + String(pin) + " servo angle set to " + String(angle));
 }
 
 void handleBatch() {
@@ -566,13 +650,7 @@ void handleBatch() {
 
     DynamicJsonDocument doc(2048);
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
-
-    if (error) {
-        server.send(400, "application/json", createResponse(400, "Invalid JSON"));
-        return;
-    }
-
-    if (!doc.containsKey("operations")) {
+    if (error || !doc.containsKey("operations")) {
         server.send(400, "application/json", createResponse(400, "Missing operations array"));
         return;
     }
@@ -581,122 +659,338 @@ void handleBatch() {
     DynamicJsonDocument responseDoc(2048);
     JsonArray results = responseDoc.createNestedArray("results");
 
-    for (JsonVariant operation : operations) {
-        JsonObject result = results.createNestedObject();
-
-        if (!operation.containsKey("type") || !operation.containsKey("pin")) {
-            result["success"] = false;
-            result["error"] = "Missing type or pin";
-            continue;
-        }
-
-        String type = operation["type"];
-        uint8_t pin = operation["pin"];
+    for (JsonVariant op : operations) {
+        JsonObject res = results.createNestedObject();
+        String type = op["type"];
+        uint8_t pin = op["pin"];
 
         if (!isValidPin(pin)) {
-            result["success"] = false;
-            result["error"] = "Invalid pin";
+            res["success"] = false;
+            res["error"] = "Invalid pin";
             continue;
         }
 
-        result["pin"] = pin;
-        result["type"] = type;
+        res["pin"] = pin;
+        res["type"] = type;
 
         if (type == "write") {
-            if (!operation.containsKey("value")) {
-                result["success"] = false;
-                result["error"] = "Missing value";
-                continue;
-            }
-
-            if (pinModes[pin] != PIN_OUTPUT) {
-                result["success"] = false;
-                result["error"] = "Pin not in OUTPUT mode";
-                continue;
-            }
-
-            int value = operation["value"];
-            digitalWrite(pin, value ? HIGH : LOW);
-            result["success"] = true;
-            result["value"] = value;
-
+            int val = op["value"];
+            pinMode(pin, OUTPUT);
+            digitalWrite(pin, val ? HIGH : LOW);
+            res["success"] = true;
+            res["value"] = val;
         } else if (type == "read") {
-            int value = digitalRead(pin);
-            result["success"] = true;
-            result["value"] = value;
-
+            res["value"] = digitalRead(pin);
+            res["success"] = true;
         } else if (type == "pwm") {
-            if (!operation.containsKey("value")) {
-                result["success"] = false;
-                result["error"] = "Missing value";
-                continue;
-            }
-
-            if (!pinSupportsMode(pin, PIN_PWM)) {
-                result["success"] = false;
-                result["error"] = "Pin does not support PWM";
-                continue;
-            }
-
-            int value = operation["value"];
-            if (value < 0 || value > 1023) {
-                result["success"] = false;
-                result["error"] = "PWM value must be 0-1023";
-                continue;
-            }
-
-            if (pinModes[pin] != PIN_PWM) {
-                pinMode(pin, OUTPUT);
-                pinModes[pin] = PIN_PWM;
-            }
-
-            analogWrite(pin, value);
-            result["success"] = true;
-            result["value"] = value;
-
+            int val = op["value"];
+            #if defined(ESP8266)
+            analogWrite(pin, val);
+            #else
+            ledcAttach(pin, 5000, 10);
+            ledcWrite(pin, val);
+            #endif
+            res["success"] = true;
+            res["value"] = val;
         } else if (type == "servo") {
-            if (!operation.containsKey("angle")) {
-                result["success"] = false;
-                result["error"] = "Missing angle";
-                continue;
-            }
-
-            if (!pinSupportsMode(pin, PIN_SERVO)) {
-                result["success"] = false;
-                result["error"] = "Pin does not support servo";
-                continue;
-            }
-
-            int angle = operation["angle"];
-            if (angle < 0 || angle > 180) {
-                result["success"] = false;
-                result["error"] = "Servo angle must be 0-180";
-                continue;
-            }
-
-            if (!servoAttached[pin]) {
-                servos[pin].attach(pin);
-                servoAttached[pin] = true;
-                pinModes[pin] = PIN_SERVO;
-            }
-
-            servos[pin].write(angle);
-            result["success"] = true;
-            result["angle"] = angle;
-
+            int angle = op["angle"];
+            writeServoAngle(pin, angle);
+            res["success"] = true;
+            res["angle"] = angle;
         } else {
-            result["success"] = false;
-            result["error"] = "Unknown operation type";
+            res["success"] = false;
+            res["error"] = "Unknown operation";
         }
     }
 
     String response;
     serializeJson(responseDoc, response);
     server.send(200, "application/json", response);
-
-    logMessage("Batch operation completed with " + String(operations.size()) + " operations");
 }
 
+// -------------------------------------------------------------
+// I2C Hardware Bus Handlers
+// -------------------------------------------------------------
+void handleI2CScan() {
+    DynamicJsonDocument doc(1536);
+    doc["sda"] = DEFAULT_SDA;
+    doc["scl"] = DEFAULT_SCL;
+    JsonArray devices = doc.createNestedArray("devices");
+
+    for (uint8_t address = 8; address < 120; address++) {
+        Wire.beginTransmission(address);
+        if (Wire.endTransmission() == 0) {
+            JsonObject dev = devices.createNestedObject();
+            dev["address"] = address;
+            char hexStr[8];
+            snprintf(hexStr, sizeof(hexStr), "0x%02X", address);
+            dev["hex"] = String(hexStr);
+        }
+    }
+
+    doc["count"] = devices.size();
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleI2CWrite() {
+    if (server.method() != HTTP_POST) {
+        server.send(405, "application/json", createResponse(405, "Method not allowed"));
+        return;
+    }
+
+    DynamicJsonDocument doc(1024);
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    if (error || !doc.containsKey("address") || !doc.containsKey("data")) {
+        server.send(400, "application/json", createResponse(400, "Missing address or data"));
+        return;
+    }
+
+    uint8_t address = doc["address"];
+    JsonArray data = doc["data"];
+
+    Wire.beginTransmission(address);
+    for (size_t i = 0; i < data.size(); i++) {
+        Wire.write((uint8_t)data[i].as<int>());
+    }
+    uint8_t err = Wire.endTransmission();
+
+    if (err == 0) {
+        server.send(200, "application/json", createResponse(200, "I2C write success"));
+    } else {
+        server.send(500, "application/json", createResponse(500, "I2C write failed, error code: " + String(err)));
+    }
+}
+
+void handleI2CRead() {
+    if (!server.hasArg("address") || !server.hasArg("length")) {
+        server.send(400, "application/json", createResponse(400, "Missing address or length"));
+        return;
+    }
+
+    uint8_t address = server.arg("address").toInt();
+    size_t length = server.arg("length").toInt();
+    if (length > 64) length = 64;
+
+    if (server.hasArg("register")) {
+        uint8_t reg = server.arg("register").toInt();
+        Wire.beginTransmission(address);
+        Wire.write(reg);
+        Wire.endTransmission(false); // Repeated start
+    }
+
+    size_t received = Wire.requestFrom((int)address, (int)length);
+    DynamicJsonDocument doc(1024);
+    doc["address"] = address;
+    doc["bytes_read"] = received;
+    JsonArray bytes = doc.createNestedArray("data");
+
+    while (Wire.available()) {
+        bytes.add(Wire.read());
+    }
+
+    String response;
+    serializeJson(doc, response);
+    server.send(200, "application/json", response);
+}
+
+void handleI2CTransfer() {
+    if (server.method() != HTTP_POST) {
+        server.send(405, "application/json", createResponse(405, "Method not allowed"));
+        return;
+    }
+
+    DynamicJsonDocument doc(1024);
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    if (error || !doc.containsKey("address")) {
+        server.send(400, "application/json", createResponse(400, "Missing address"));
+        return;
+    }
+
+    uint8_t address = doc["address"];
+    if (doc.containsKey("write")) {
+        JsonArray wdata = doc["write"];
+        Wire.beginTransmission(address);
+        for (size_t i = 0; i < wdata.size(); i++) {
+            Wire.write((uint8_t)wdata[i].as<int>());
+        }
+        Wire.endTransmission(doc.containsKey("read_length") ? false : true);
+    }
+
+    DynamicJsonDocument responseDoc(1024);
+    responseDoc["address"] = address;
+
+    if (doc.containsKey("read_length")) {
+        size_t len = doc["read_length"];
+        if (len > 64) len = 64;
+        Wire.requestFrom((int)address, (int)len);
+        JsonArray rdata = responseDoc.createNestedArray("read");
+        while (Wire.available()) {
+            rdata.add(Wire.read());
+        }
+    }
+
+    responseDoc["status"] = 200;
+    String response;
+    serializeJson(responseDoc, response);
+    server.send(200, "application/json", response);
+}
+
+// -------------------------------------------------------------
+// Real-Time Events Handlers (Server-Sent Events)
+// -------------------------------------------------------------
+void handleEvents() {
+    WiFiClient client = server.client();
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/event-stream");
+    client.println("Cache-Control: no-cache");
+    client.println("Connection: keep-alive");
+    client.println("Access-Control-Allow-Origin: *");
+    client.println();
+    #if defined(ESP8266)
+    client.flush();
+    #endif
+
+    sseClient = client;
+    sseClientConnected = true;
+    lastEventPing = millis();
+
+    sseClient.println("event: connected\ndata: {\"status\":\"connected\",\"arch\":\"" + String(ARCH_NAME) + "\"}\n\n");
+    #if defined(ESP8266)
+    sseClient.flush();
+    #endif
+}
+
+void handleEventSubscribe() {
+    if (server.method() != HTTP_POST) {
+        server.send(405, "application/json", createResponse(405, "Method not allowed"));
+        return;
+    }
+
+    DynamicJsonDocument doc(512);
+    DeserializationError error = deserializeJson(doc, server.arg("plain"));
+    if (error || !doc.containsKey("pin")) {
+        server.send(400, "application/json", createResponse(400, "Missing pin"));
+        return;
+    }
+
+    uint8_t pin = doc["pin"];
+    String modeStr = doc.containsKey("mode") ? doc["mode"].as<String>() : "CHANGE";
+    uint8_t m = 0;
+    if (modeStr.equalsIgnoreCase("RISING")) m = 1;
+    else if (modeStr.equalsIgnoreCase("FALLING")) m = 2;
+
+    if (!isValidPin(pin)) {
+        server.send(400, "application/json", createResponse(400, "Invalid pin"));
+        return;
+    }
+
+    pinMode(pin, INPUT_PULLUP);
+    pinModes[pin] = PIN_INPUT_PULLUP;
+
+    // Register into watcher list
+    bool added = false;
+    for (int i = 0; i < MAX_WATCHERS; i++) {
+        if (!watchers[i].active || watchers[i].pin == pin) {
+            watchers[i].pin = pin;
+            watchers[i].mode = m;
+            watchers[i].lastState = digitalRead(pin);
+            watchers[i].active = true;
+            added = true;
+            break;
+        }
+    }
+
+    if (added) {
+        server.send(200, "application/json", createResponse(200, "Subscribed to pin " + String(pin)));
+    } else {
+        server.send(500, "application/json", createResponse(500, "Maximum watchers reached"));
+    }
+}
+
+void checkPinEvents() {
+    if (!sseClientConnected || !sseClient.connected()) {
+        sseClientConnected = false;
+        return;
+    }
+
+    // Heartbeat ping every 10 seconds
+    if (millis() - lastEventPing > 10000) {
+        lastEventPing = millis();
+        sseClient.println("event: ping\ndata: {\"uptime\":" + String(millis()) + "}\n\n");
+        #if defined(ESP8266)
+        sseClient.flush();
+        #endif
+    }
+
+    // Check watched pins
+    for (int i = 0; i < MAX_WATCHERS; i++) {
+        if (watchers[i].active) {
+            int currentState = digitalRead(watchers[i].pin);
+            if (currentState != watchers[i].lastState) {
+                bool trigger = false;
+                if (watchers[i].mode == 0) trigger = true; // CHANGE
+                else if (watchers[i].mode == 1 && currentState == HIGH) trigger = true; // RISING
+                else if (watchers[i].mode == 2 && currentState == LOW) trigger = true;  // FALLING
+
+                watchers[i].lastState = currentState;
+
+                if (trigger) {
+                    sseClient.println("event: pin_change\ndata: {\"pin\":" + String(watchers[i].pin) + ",\"value\":" + String(currentState) + ",\"timestamp\":" + String(millis()) + "}\n\n");
+                    #if defined(ESP8266)
+                    sseClient.flush();
+                    #endif
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// Over-The-Air (OTA) Binary Upload Handlers
+// -------------------------------------------------------------
+void handleOTAUpload() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        logMessage("OTA Update started: " + upload.filename);
+        #if defined(ESP32)
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            Update.printError(Serial);
+        }
+        #else
+        uint32_t maxSketchSpace = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+        if (!Update.begin(maxSketchSpace)) {
+            Update.printError(Serial);
+        }
+        #endif
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            Update.printError(Serial);
+        }
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (Update.end(true)) {
+            logMessage("OTA Update success: " + String(upload.totalSize) + " bytes");
+        } else {
+            Update.printError(Serial);
+        }
+    }
+}
+
+void handleOTAFinish() {
+    server.sendHeader("Connection", "close");
+    if (Update.hasError()) {
+        server.send(500, "application/json", createResponse(500, "OTA Update failed"));
+    } else {
+        server.send(200, "application/json", createResponse(200, "OTA Update successful. Rebooting..."));
+        delay(500);
+        ESP.restart();
+    }
+}
+
+// -------------------------------------------------------------
+// Utilities & WiFi Handlers
+// -------------------------------------------------------------
 void handleNotFound() {
     server.send(404, "application/json", createResponse(404, "Endpoint not found"));
 }
@@ -706,7 +1000,6 @@ String createResponse(int code, String message) {
     doc["status"] = code;
     doc["message"] = message;
     doc["timestamp"] = millis();
-
     String response;
     serializeJson(doc, response);
     return response;
@@ -714,9 +1007,7 @@ String createResponse(int code, String message) {
 
 bool isValidPin(uint8_t pin) {
     for (int i = 0; i < numPins; i++) {
-        if (pinCapabilities[i].pin == pin) {
-            return true;
-        }
+        if (pinCapabilities[i].pin == pin) return true;
     }
     return false;
 }
@@ -747,48 +1038,37 @@ void logMessage(String message) {
 
 void loadWiFiCredentials() {
     if (EEPROM.read(CONFIG_FLAG_ADDR) == CONFIG_MAGIC) {
-        // Read SSID
         for (int i = 0; i < 32; i++) {
             char c = EEPROM.read(WIFI_SSID_ADDR + i);
             if (c == 0) break;
             savedSSID += c;
         }
-
-        // Read Password
         for (int i = 0; i < 32; i++) {
             char c = EEPROM.read(WIFI_PASS_ADDR + i);
             if (c == 0) break;
             savedPassword += c;
         }
-
-        logMessage("Loaded WiFi credentials from EEPROM");
+        logMessage("Loaded saved WiFi credentials");
     }
 }
 
 void saveWiFiCredentials(String ssid, String password) {
-    // Clear the areas first
     for (int i = 0; i < 32; i++) {
         EEPROM.write(WIFI_SSID_ADDR + i, 0);
         EEPROM.write(WIFI_PASS_ADDR + i, 0);
     }
-
-    // Write SSID
     for (size_t i = 0; i < ssid.length() && i < 31; i++) {
         EEPROM.write(WIFI_SSID_ADDR + i, ssid[i]);
     }
-
-    // Write Password
     for (size_t i = 0; i < password.length() && i < 31; i++) {
         EEPROM.write(WIFI_PASS_ADDR + i, password[i]);
     }
-
-    // Set magic flag
     EEPROM.write(CONFIG_FLAG_ADDR, CONFIG_MAGIC);
     EEPROM.commit();
 
     savedSSID = ssid;
     savedPassword = password;
-    logMessage("WiFi credentials saved to EEPROM");
+    logMessage("Saved WiFi credentials");
 }
 
 void handleConfigureWiFi() {
@@ -799,13 +1079,7 @@ void handleConfigureWiFi() {
 
     DynamicJsonDocument doc(1024);
     DeserializationError error = deserializeJson(doc, server.arg("plain"));
-
-    if (error) {
-        server.send(400, "application/json", createResponse(400, "Invalid JSON"));
-        return;
-    }
-
-    if (!doc.containsKey("ssid") || !doc.containsKey("password")) {
+    if (error || !doc.containsKey("ssid") || !doc.containsKey("password")) {
         server.send(400, "application/json", createResponse(400, "Missing ssid or password"));
         return;
     }
@@ -813,20 +1087,13 @@ void handleConfigureWiFi() {
     String ssid = doc["ssid"];
     String password = doc["password"];
 
-    if (ssid.length() == 0 || ssid.length() > 31) {
-        server.send(400, "application/json", createResponse(400, "Invalid SSID length"));
-        return;
-    }
-
-    if (password.length() > 31) {
-        server.send(400, "application/json", createResponse(400, "Invalid password length"));
+    if (ssid.length() == 0 || ssid.length() > 31 || password.length() > 31) {
+        server.send(400, "application/json", createResponse(400, "Invalid credential length"));
         return;
     }
 
     saveWiFiCredentials(ssid, password);
-
-    server.send(200, "application/json", createResponse(200, "WiFi credentials configured. Restart to apply."));
-    logMessage("WiFi credentials updated via API");
+    server.send(200, "application/json", createResponse(200, "WiFi configured. Restart to apply."));
 }
 
 void handleRestart() {
@@ -834,9 +1101,8 @@ void handleRestart() {
         server.send(405, "application/json", createResponse(405, "Method not allowed"));
         return;
     }
-
     server.send(200, "application/json", createResponse(200, "Restarting..."));
-    delay(1000);
+    delay(500);
     ESP.restart();
 }
 
@@ -858,7 +1124,7 @@ void handleSerialCommands() {
                     Serial.println("RESET_CONFIG - Clear saved WiFi credentials");
                 } else if (serialBuffer.equalsIgnoreCase("STATUS")) {
                     Serial.println("\n--- ESP-Linker Status ---");
-                    Serial.println("Firmware: ESP-Linker v1.3.9");
+                    Serial.println("Firmware: ESP-Linker v" + String(FIRMWARE_VERSION) + " (" + String(ARCH_NAME) + ")");
                     Serial.println("Uptime: " + String(millis() / 1000) + "s");
                     Serial.println("Free Heap: " + String(ESP.getFreeHeap()) + " bytes");
                     if (WiFi.status() == WL_CONNECTED) {
@@ -877,7 +1143,11 @@ void handleSerialCommands() {
                         Serial.println("No networks found");
                     } else {
                         for (int i = 0; i < n; ++i) {
+                            #if defined(ESP8266)
                             String sec = (WiFi.encryptionType(i) == ENC_TYPE_NONE) ? "Open" : "Secured";
+                            #else
+                            String sec = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Secured";
+                            #endif
                             Serial.printf("%d: %s (%d dBm) [%s]\n", i + 1, WiFi.SSID(i).c_str(), WiFi.RSSI(i), sec.c_str());
                         }
                     }
